@@ -1,0 +1,9 @@
+# Training artifacts are large and live on the pod; synced copies stay untracked
+artifacts/checkpoints/
+artifacts/videos/
+*.pt
+*.mp4
+events.out.tfevents.*
+
+# SDD scratch workspace
+.superpowers/
