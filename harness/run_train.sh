@@ -9,10 +9,17 @@
 
 set -euo pipefail
 
+# Working directory for the launched command. Defaults to the RunPod Isaac Lab checkout;
+# override for any other host (the Brev L40S keeps its install under ~/isaac/IsaacLab).
+# This used to be hardcoded, which silently turned every run on a different box into an
+# instant HARNESS_EXIT=1 -- the `cd` failed and && skipped the command entirely.
+WORKDIR="${WORKDIR:-/workspace/IsaacLab}"
+
 SESSION="${1:?session name}"
 LOG="${2:?logfile}"
 shift 2
 [ "$#" -gt 0 ] || { echo "no command given" >&2; exit 2; }
+[ -d "$WORKDIR" ] || { echo "WORKDIR does not exist: $WORKDIR" >&2; exit 2; }
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
   echo "ALREADY_RUNNING $SESSION (tmux kill-session -t $SESSION to replace)"
@@ -26,6 +33,6 @@ mkdir -p "$(dirname "$LOG")"
 
 printf -v CMD '%q ' "$@"
 tmux new-session -d -s "$SESSION" \
-  "cd /workspace/IsaacLab && $CMD >>'$LOG' 2>&1; echo \"HARNESS_EXIT=\$?\" >>'$LOG'"
+  "cd '$WORKDIR' && $CMD >>'$LOG' 2>&1; echo \"HARNESS_EXIT=\$?\" >>'$LOG'"
 
 echo "STARTED $SESSION -> $LOG"
