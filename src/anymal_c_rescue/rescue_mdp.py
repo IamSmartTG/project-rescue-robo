@@ -15,14 +15,24 @@ import torch
 from typing import TYPE_CHECKING
 
 import isaaclab.utils.math as math_utils
-from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.sensors import Camera, RayCaster
 
 from . import thermal
 
+# Articulation / RigidObject / Camera / RayCaster are the *runtime* classes, and importing
+# them at module scope crashes the process outright -- exit 134/139 before a single line of
+# our code runs. They can only be imported once SimulationApp exists, and this module is
+# imported well before that: hydra resolves ``env_cfg_entry_point`` (rescue_env_cfg, which
+# imports this file) inside ``_run_hydra``, which runs before ``launch_simulation``.
+# Isaac Lab's own mdp modules (e.g. velocity/mdp/rewards.py) guard them the same way.
+#
+# Safe because every use below is an annotation only, and ``from __future__ import
+# annotations`` above makes annotations strings that are never evaluated at runtime. If you
+# ever need one of these at runtime, import it inside the function body, not here.
 if TYPE_CHECKING:
+    from isaaclab.assets import Articulation, RigidObject
     from isaaclab.envs import ManagerBasedEnv, ManagerBasedRLEnv
+    from isaaclab.sensors import Camera, RayCaster
 
 
 ##
