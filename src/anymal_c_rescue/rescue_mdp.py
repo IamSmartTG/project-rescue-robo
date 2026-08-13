@@ -285,6 +285,7 @@ def _detectable_victims(
     victim_names: tuple[str, ...],
     asset_cfg: SceneEntityCfg,
     detect_range: float,
+    fov_half_deg: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Nearest victim that is close enough to be sensed, plus the unit vector to it.
 
@@ -305,8 +306,20 @@ def _detectable_victims(
     delta_xy = victims_w[..., :2] - root_pos_w[:, None, :2]  # (N, V, 2)
     dist = torch.norm(delta_xy, dim=-1)  # (N, V)
 
-    out_of_range = dist > detect_range
-    dist_masked = dist.masked_fill(out_of_range, float("inf"))
+    undetected = dist > detect_range
+
+    if fov_half_deg is not None:
+        # Require the casualty to be inside the thermal camera's cone, not merely within
+        # the 360-degree LiDAR's reach. Without this the gate gates nothing: the LiDAR sees
+        # all round out to 10 m and victims spawn at 1.6-3.6 m, so every victim is detected
+        # from the instant of spawn and the task degenerates from "search" to "approach".
+        # Facing-dependent reward is what forces the robot to turn, scan, and actually look.
+        target_yaw = torch.atan2(delta_xy[..., 1], delta_xy[..., 0])  # (N, V)
+        heading = asset.data.heading_w.torch.unsqueeze(-1)  # (N, 1)
+        bearing = math_utils.wrap_to_pi(target_yaw - heading).abs()
+        undetected = undetected | (bearing > torch.deg2rad(torch.tensor(fov_half_deg, device=dist.device)))
+
+    dist_masked = dist.masked_fill(undetected, float("inf"))
     nearest_dist, nearest_idx = dist_masked.min(dim=1)
     has_target = torch.isfinite(nearest_dist)
 
@@ -319,6 +332,7 @@ def victim_approach_rate(
     env: ManagerBasedRLEnv,
     victim_names: tuple[str, ...],
     detect_range: float = 10.0,
+    fov_half_deg: float | None = 30.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
     """Speed at which the robot is closing on the nearest detectable victim [m/s].
@@ -342,7 +356,9 @@ def victim_approach_rate(
         Closing speed [m/s], clipped at zero. Shape ``(num_envs,)``.
     """
     asset: Articulation = env.scene[asset_cfg.name]
-    has_target, _, unit_xy = _detectable_victims(env, victim_names, asset_cfg, detect_range)
+    has_target, _, unit_xy = _detectable_victims(
+        env, victim_names, asset_cfg, detect_range, fov_half_deg
+    )
     vel_xy = asset.data.root_lin_vel_w.torch[:, :2]
     rate = (vel_xy * unit_xy).sum(dim=-1).clamp(min=0.0)
     return torch.where(has_target, rate, torch.zeros_like(rate))

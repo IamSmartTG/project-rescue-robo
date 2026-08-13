@@ -41,6 +41,7 @@ import torch  # noqa: E402
 
 import isaaclab.sim as sim_utils  # noqa: E402
 from isaaclab.sensors import CameraCfg  # noqa: E402
+from isaaclab_physx.renderers import IsaacRtxRendererCfg  # noqa: E402
 
 import isaaclab_tasks  # noqa: F401, E402
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg  # noqa: E402
@@ -70,6 +71,11 @@ env_cfg.scene.chase_camera = CameraCfg(
     height=720,
     spawn=sim_utils.PinholeCameraCfg(focal_length=20.0, clipping_range=(0.05, 80.0)),
     update_period=0.0,  # every physics-render tick, so no frames are skipped
+    # Explicit default renderer. Without it this camera renders pure black whenever the
+    # scene also contains the pseudo-thermal camera, which carries its own
+    # IsaacRtxRendererCfg(semantic_filter="class:*"). It renders fine in the camera-free
+    # task. Giving each camera its own renderer config stops them sharing one.
+    renderer_cfg=IsaacRtxRendererCfg(),
 )
 
 agent_cfg = load_cfg_from_registry(args.task, "rsl_rl_cfg_entry_point")

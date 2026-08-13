@@ -353,7 +353,17 @@ class RescueRewardsCfg(RewardsCfg):
     victim_approach = RewTerm(
         func=rescue_mdp.victim_approach_rate,
         weight=0.5,
-        params={"victim_names": VICTIM_ASSET_NAMES, "detect_range": LIDAR_MAX_RANGE},
+        params={
+            "victim_names": VICTIM_ASSET_NAMES,
+            "detect_range": LIDAR_MAX_RANGE,
+            # Gate on the thermal camera's cone (~60 deg horizontal at focal_length=18 with
+            # the default 20.955 mm aperture, so 30 deg half-angle), NOT the 360-degree
+            # LiDAR. With a range-only gate the gate gated nothing: the LiDAR reaches 10 m
+            # all round and victims spawn at 1.6-3.6 m, so every casualty was detected from
+            # the instant of spawn and the task was "approach", never "search". Requiring
+            # the victim to be in front is what forces the robot to turn and scan.
+            "fov_half_deg": 30.0,
+        },
     )
     victim_found = RewTerm(
         func=rescue_mdp.victim_found,
