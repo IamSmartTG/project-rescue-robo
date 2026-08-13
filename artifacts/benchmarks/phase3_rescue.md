@@ -186,13 +186,38 @@ was largely wrong.
 
 What that leaves, in order of what the evidence now supports:
 
-1. **The disturbance events.** `push_robot` and `base_external_force_torque` shove the robot
-   throughout training and are active in every number above. `AnymalCRescueEnvCfg_PLAY`
-   disables them; measuring eval fall rate under PLAY would separate "cannot stay upright on
-   terrain" from "is being actively shoved", and that has not been measured yet. Cheapest
-   next experiment by a wide margin.
+1. **The disturbance events.** Tested — see below.
 2. **Reward weights.** No penalty scales with base contact beyond termination itself.
 3. Terrain generator mix — the rubble tiers may simply be beyond an 0.30 m-clearance robot.
+
+### Experiment: turn the disturbances off — the falls are the terrain
+
+`harness/eval_rescue.py --no_disturbance` nulls `push_robot` and
+`base_external_force_torque` and changes nothing else — same policy, same terrain, same
+payload, same observation noise. Switching to the PLAY task would have disabled them too but
+shrunk the terrain grid at the same time, confounding the variable.
+
+| Metric | Disturbances on | Disturbances off | Change |
+|---|---|---|---|
+| Fall rate | 0.3906 | **0.3398** | −0.0508 |
+| Victim-find success | 0.3867 | 0.3633 | −0.0234 |
+| Mean episode length | 780.6 | 805.3 | +24.7 |
+
+**The shoves account for about 5 points of a 39-point fall rate. The other 34 points are the
+robot failing on the terrain unaided.** That settles the question the two experiments were
+built to answer: this is a locomotion-capability problem, not an artefact of training
+randomisation and not a curriculum-scheduling artefact.
+
+Success rate drifting *down* slightly with disturbances removed is almost certainly noise at
+n=256 — it should be ignored rather than explained. If it survives a larger sample it would
+be interesting, but nothing here justifies a story about it yet.
+
+Running total on the fall rate: curriculum freeze −2.4 points, disturbances off −5.1 points,
+~34 points unexplained and belonging to terrain-vs-capability. The untested candidates now
+are the emergency-supply payload (2–12 kg plus randomized inertia on a ~30 kg trunk is a
+large handicap, and it is carried in every number in this document), the terrain generator's
+rubble mix against a robot with ~0.30 m ground clearance, and simply far more training than
+the ~5,200 total iterations this policy has seen.
 
 The modest gains that *did* appear (time-to-find −0.86 s, episode length +21.5 steps) are
 consistent with a slightly more settled gait, which is worth keeping. The frozen checkpoint
