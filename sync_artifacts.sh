@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
-# Pull training artifacts off the RunPod pod to this laptop.
-# Usage: ./sync_artifacts.sh
+# Pull training artifacts off the training host to this laptop.
+# Usage: ./sync_artifacts.sh            # Brev (current host)
+#        HOST=runpod REMOTE_LOGS=/workspace/IsaacLab/logs/rsl_rl ./sync_artifacts.sh
 #
-# If this fails with "Connection refused", the pod restarted and RunPod reassigned
-# the SSH port -- update Port in ~/.ssh/config from the console's Connect tab.
+# The RunPod pod is terminated -- RunPod cannot create a Vulkan instance, which kills the
+# thermal camera, so training moved to the Brev L40S. `brev login` if ssh says no such host.
 
 set -euo pipefail
 
 DEST="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/artifacts"
-REMOTE_LOGS="/workspace/IsaacLab/logs/rsl_rl"
+HOST="${HOST:-mute-teal-zebra}"
+REMOTE_LOGS="${REMOTE_LOGS:-/home/shadeform/isaac/IsaacLab/logs/rsl_rl}"
+# Run logs live in the remote home dir, one per stage. Space-separated, remote-side paths.
+REMOTE_RUNLOGS="${REMOTE_RUNLOGS:-/home/shadeform/stage1.log /home/shadeform/stage2.log}"
 
 echo "==> checkpoints + tensorboard logs"
 rsync -avh --progress \
@@ -18,15 +22,17 @@ rsync -avh --progress \
   --include="*.yaml" \
   --include="*.json" \
   --exclude="*" \
-  runpod:"${REMOTE_LOGS}/" "${DEST}/checkpoints/"
+  "${HOST}":"${REMOTE_LOGS}/" "${DEST}/checkpoints/"
 
 echo "==> videos"
 rsync -avh --progress \
   --include="*/" --include="*.mp4" --exclude="*" \
-  runpod:"${REMOTE_LOGS}/" "${DEST}/videos/" || echo "(no videos yet)"
+  "${HOST}":"${REMOTE_LOGS}/" "${DEST}/videos/" || echo "(no videos yet)"
 
 echo "==> run logs"
-rsync -avh runpod:/workspace/train.log "${DEST}/benchmarks/train.log" || true
+for log in ${REMOTE_RUNLOGS}; do
+  rsync -avh "${HOST}":"${log}" "${DEST}/benchmarks/$(basename "${log}")" || true
+done
 
 echo
 echo "Done. Artifacts in: ${DEST}"
