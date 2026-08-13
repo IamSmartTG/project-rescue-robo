@@ -27,6 +27,10 @@ parser.add_argument("--task", type=str, default="Isaac-Rescue-Anymal-C-v0")
 parser.add_argument("--checkpoint", type=str, required=True)
 parser.add_argument("--num_envs", type=int, default=256)
 parser.add_argument("--out", type=str, default="eval_rescue.json")
+# Disables the random shoves only, leaving terrain, payload and observation noise identical.
+# Switching to the PLAY task would disable them too but also shrink the terrain grid, which
+# would confound the one variable this is meant to isolate.
+parser.add_argument("--no_disturbance", action="store_true")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.enable_cameras = True  # the thermal sensor is part of the observation the policy expects
@@ -54,6 +58,15 @@ env_cfg = parse_env_cfg(args.task, device=args.device, num_envs=args.num_envs)
 # ``max_init_terrain_level``, and the curriculum then moves it. So the level reported below
 # describes the tiers this eval actually ran on -- it is not a restatement of the training
 # curriculum, and must not be read as one.
+
+if args.no_disturbance:
+    # Isolates the question "can this robot stay upright on this terrain" from "is this robot
+    # being shoved". Both events are active in every eval number recorded so far, so a fall
+    # rate measured with them on cannot distinguish the two.
+    for term in ("push_robot", "base_external_force_torque"):
+        if getattr(env_cfg.events, term, None) is not None:
+            setattr(env_cfg.events, term, None)
+    print("[INFO] disturbance events disabled (push_robot, base_external_force_torque)")
 
 agent_cfg = load_cfg_from_registry(args.task, "rsl_rl_cfg_entry_point")
 from importlib import metadata  # noqa: E402
