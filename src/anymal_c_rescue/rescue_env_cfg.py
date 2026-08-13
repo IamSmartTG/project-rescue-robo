@@ -125,13 +125,25 @@ def _victim_asset_cfg(index: int, offset: tuple[float, float, float]) -> RigidOb
         prim_path=f"{{ENV_REGEX_NS}}/Victim_{index}",
         init_state=RigidObjectCfg.InitialStateCfg(pos=offset),
         spawn=sim_utils.MeshCuboidCfg(
-            size=(0.70, 0.35, 0.28),
+            # Proportions of a prone adult (1.75 x 0.45 x 0.30 m) rather than the original
+            # stubby 0.70 x 0.35 x 0.28 crate, so it reads as a casualty in renders and
+            # gives the LiDAR a body-shaped return instead of a small block.
+            #
+            # Still a cuboid, deliberately. The mesh spawners are primitives only
+            # (Cuboid/Capsule/Cylinder/Sphere -- no compound torso+head in one rigid body),
+            # and RigidBodyBaseCfg exposes no angular damping, so a capsule or cylinder
+            # would roll away down every slope in ROUGH_TERRAINS_CFG. A genuine humanoid
+            # needs a USD mesh prop; Isaac's People assets are rigged animated characters,
+            # not rigid bodies, so they are the wrong tool for a 45 kg physics object.
+            size=(1.75, 0.45, 0.30),
             rigid_props=sim_utils.RigidBodyBaseCfg(),
             collision_props=CollisionBaseCfg(collision_enabled=True),
             mass_props=sim_utils.MassPropertiesCfg(mass=45.0),
             semantic_tags=[("class", "victim")],
+            # Muted clothing tone rather than crate-orange, and still slightly emissive so a
+            # casualty reads as warm in the RGB render the way it does in the thermal one.
             visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.85, 0.35, 0.25), emissive_color=(0.25, 0.05, 0.0), roughness=0.8
+                diffuse_color=(0.62, 0.24, 0.20), emissive_color=(0.18, 0.04, 0.02), roughness=0.9
             ),
         ),
     )
