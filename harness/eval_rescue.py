@@ -31,6 +31,9 @@ parser.add_argument("--out", type=str, default="eval_rescue.json")
 # Switching to the PLAY task would disable them too but also shrink the terrain grid, which
 # would confound the one variable this is meant to isolate.
 parser.add_argument("--no_disturbance", action="store_true")
+# The emergency-supply payload is carried in every measurement taken so far. 2-12 kg plus
+# randomized inertia on a ~30 kg trunk is a large handicap and an obvious fall suspect.
+parser.add_argument("--no_payload", action="store_true")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.enable_cameras = True  # the thermal sensor is part of the observation the policy expects
@@ -67,6 +70,15 @@ if args.no_disturbance:
         if getattr(env_cfg.events, term, None) is not None:
             setattr(env_cfg.events, term, None)
     print("[INFO] disturbance events disabled (push_robot, base_external_force_torque)")
+
+if args.no_payload:
+    # Note this measures an unloaded robot the policy was never trained as -- it trained
+    # always carrying something. A drop in fall rate here means the payload is the handicap;
+    # a rise would mean the policy has come to rely on the added mass.
+    for term in ("add_payload_mass", "add_payload_inertia"):
+        if getattr(env_cfg.events, term, None) is not None:
+            setattr(env_cfg.events, term, None)
+    print("[INFO] emergency-supply payload disabled")
 
 agent_cfg = load_cfg_from_registry(args.task, "rsl_rl_cfg_entry_point")
 from importlib import metadata  # noqa: E402

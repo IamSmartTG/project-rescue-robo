@@ -212,12 +212,49 @@ Success rate drifting *down* slightly with disturbances removed is almost certai
 n=256 — it should be ignored rather than explained. If it survives a larger sample it would
 be interesting, but nothing here justifies a story about it yet.
 
-Running total on the fall rate: curriculum freeze −2.4 points, disturbances off −5.1 points,
-~34 points unexplained and belonging to terrain-vs-capability. The untested candidates now
-are the emergency-supply payload (2–12 kg plus randomized inertia on a ~30 kg trunk is a
-large handicap, and it is carried in every number in this document), the terrain generator's
-rubble mix against a robot with ~0.30 m ground clearance, and simply far more training than
-the ~5,200 total iterations this policy has seen.
+### Experiment: drop the emergency-supply payload — the largest single contributor
+
+`--no_payload` nulls `add_payload_mass` and `add_payload_inertia`, nothing else. Note this
+measures an unloaded robot the policy was never trained as: it trained always carrying
+something, so a *rise* in falls would have meant the policy had come to rely on the mass.
+
+| Metric | Payload on (2–12 kg) | Payload off | Change |
+|---|---|---|---|
+| Fall rate | 0.3906 | **0.3242** | −0.0664 |
+| Victim-find success | 0.3867 | **0.4062** | +0.0195 |
+| Mean time to find | 4.63 s | 6.32 s | +1.69 s |
+
+The payload is the biggest single contributor found — larger than the disturbances and the
+curriculum combined — and it is the only intervention that moved success rate in the right
+direction as well as fall rate.
+
+### Fall-rate budget, all three experiments
+
+Starting from 0.3906 on the frozen policy, each tested in isolation:
+
+| Removed | Fall rate | Points recovered |
+|---|---|---|
+| (nothing) | 0.3906 | — |
+| Terrain curriculum scheduling | 0.4141 → 0.3906 | 2.4 |
+| Disturbance events | 0.3398 | 5.1 |
+| **Emergency-supply payload** | **0.3242** | **6.6** |
+| Floor: terrain vs. robot capability | ~0.32 | ~32 unexplained |
+
+Even with every removable handicap gone, roughly a third of episodes still end in a fall.
+That residual is the robot against the terrain, and it is the real ceiling on this policy.
+
+**The payload is not a bug to delete** — it is a project requirement, the most defensible
+"rescue" element in the training, and the thing that makes the gait generalise over what the
+robot is carrying. The actionable version is to narrow the range (2–12 kg is a 7–40% swing on
+a ~30 kg trunk; 2–6 kg would halve it) or to train substantially longer with it, rather than
+to drop it and quote the better number.
+
+Recommended order for whoever picks this up:
+
+1. Narrow the payload range and retrain. Best measured evidence, and it keeps the requirement.
+2. More iterations — this policy has seen only ~5,200 total, and reward was still climbing.
+3. Terrain generator mix against ~0.30 m ground clearance.
+4. `detect_range` 10 m → 8 m (correctness, unrelated to falls).
 
 The modest gains that *did* appear (time-to-find −0.86 s, episode length +21.5 steps) are
 consistent with a slightly more settled gait, which is worth keeping. The frozen checkpoint
