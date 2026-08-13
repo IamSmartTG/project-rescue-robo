@@ -176,7 +176,21 @@ class RescueSceneCfg(MySceneCfg):
     # camera straight out of the robot's nose. Requires --enable_cameras at launch.
     thermal_camera = CameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base/ThermalCamera",
-        offset=CameraCfg.OffsetCfg(pos=(0.35, 0.0, 0.05), rot=(0.0, 0.0, 0.0, 1.0), convention="world"),
+        # Mounted at 0.22 m, not 0.05 m. Measured at 0.05 m the trunk and front legs filled
+        # 74% of every frame (48,640 of 65,536 px across 16 envs) while victims got 0.9%
+        # -- the camera was mostly imaging the robot it is bolted to. Raising it above the
+        # base clears the chassis. rot stays identity: OffsetCfg.rot is (x, y, z, w), so
+        # (0,0,0,1) IS identity, and with convention="world" (forward +X) that looks
+        # straight ahead.
+        # Pitched down 15 deg, not level. The sensor sits ~0.79 m up (base ~0.57 + 0.22) and
+        # the casualties are 0.28 m boxes lying 1.6-3.6 m away, so a level camera puts them
+        # under the centre line: measured 261 victim px level vs 614 at the old low mount.
+        # atan((0.79 - 0.14) / 2.5) ~= 15 deg centres the search band instead.
+        # rot is (x, y, z, w): a rotation of +15 deg about +Y takes forward +X down toward
+        # -Z, giving (0, sin(7.5), 0, cos(7.5)).
+        offset=CameraCfg.OffsetCfg(
+            pos=(0.40, 0.0, 0.22), rot=(0.0, 0.13053, 0.0, 0.99144), convention="world"
+        ),
         data_types=["semantic_segmentation"],
         width=THERMAL_RESOLUTION[0],
         height=THERMAL_RESOLUTION[1],
@@ -265,54 +279,23 @@ class RescueEventsCfg(EventsCfg):
         },
     )
 
-    # Move the victim props from their authored clone-grid pose onto this env's terrain
-    # patch. ``reset_root_state_uniform`` writes ``default_root_pose + env_origins``.
-    reset_victim_0 = EventTerm(
-        func=mdp.reset_root_state_uniform,
+    # Scatter the victims afresh every episode. This is the search task: with victims at
+    # fixed offsets the optimal policy is "walk 2.9 m along a fixed bearing", learnable from
+    # proprioception alone, which leaves the LiDAR and thermal camera as pure render cost
+    # with no path to influencing return. Re-drawing the layout makes the sensors the only
+    # way to locate a casualty.
+    #
+    # This also subsumes the earlier per-victim reset_root_state_uniform terms, which
+    # existed to spread ~20 envs sharing one env_origins row (10x20=200 patches at 4096
+    # envs) off a single coincident point. Annulus sampling handles that far better.
+    reset_victims = EventTerm(
+        func=rescue_mdp.reset_victims_annulus,
         mode="reset",
         params={
-            # x/y jitter is required for correctness, not variety. ROUGH_TERRAINS_CFG is
-            # 10 rows x 20 cols = 200 patches, so at num_envs=4096 roughly 20 envs share
-            # one env_origins row. With yaw-only randomization every one of those envs
-            # wrote its victim to the identical world position -- ~20 coincident 45 kg
-            # cuboids with a degenerate contact normal, re-stacked on every reset.
-            # +-1.0 m keeps all three inside the 8x8 m patch (worst case victim_2 reaches
-            # y = -3.8 against a 4.0 m half-width).
-            "pose_range": {"x": (-1.0, 1.0), "y": (-1.0, 1.0), "yaw": (-3.1416, 3.1416)},
-            "velocity_range": {},
-            "asset_cfg": SceneEntityCfg("victim_0"),
-        },
-    )
-    reset_victim_1 = EventTerm(
-        func=mdp.reset_root_state_uniform,
-        mode="reset",
-        params={
-            # x/y jitter is required for correctness, not variety. ROUGH_TERRAINS_CFG is
-            # 10 rows x 20 cols = 200 patches, so at num_envs=4096 roughly 20 envs share
-            # one env_origins row. With yaw-only randomization every one of those envs
-            # wrote its victim to the identical world position -- ~20 coincident 45 kg
-            # cuboids with a degenerate contact normal, re-stacked on every reset.
-            # +-1.0 m keeps all three inside the 8x8 m patch (worst case victim_2 reaches
-            # y = -3.8 against a 4.0 m half-width).
-            "pose_range": {"x": (-1.0, 1.0), "y": (-1.0, 1.0), "yaw": (-3.1416, 3.1416)},
-            "velocity_range": {},
-            "asset_cfg": SceneEntityCfg("victim_1"),
-        },
-    )
-    reset_victim_2 = EventTerm(
-        func=mdp.reset_root_state_uniform,
-        mode="reset",
-        params={
-            # x/y jitter is required for correctness, not variety. ROUGH_TERRAINS_CFG is
-            # 10 rows x 20 cols = 200 patches, so at num_envs=4096 roughly 20 envs share
-            # one env_origins row. With yaw-only randomization every one of those envs
-            # wrote its victim to the identical world position -- ~20 coincident 45 kg
-            # cuboids with a degenerate contact normal, re-stacked on every reset.
-            # +-1.0 m keeps all three inside the 8x8 m patch (worst case victim_2 reaches
-            # y = -3.8 against a 4.0 m half-width).
-            "pose_range": {"x": (-1.0, 1.0), "y": (-1.0, 1.0), "yaw": (-3.1416, 3.1416)},
-            "velocity_range": {},
-            "asset_cfg": SceneEntityCfg("victim_2"),
+            "victim_names": VICTIM_ASSET_NAMES,
+            # max radius stays inside the 8x8 m patch half-width of 4.0 m
+            "radius_range": (1.6, 3.6),
+            "drop_height": 2.0,
         },
     )
 
@@ -322,26 +305,37 @@ class RescueRewardsCfg(RewardsCfg):
     """All locomotion reward terms (unchanged) plus victim-search shaping."""
 
     # -- victim search
-    # weight 0.25, not 1.0. At 1.0 this term collapsed the inherited terrain curriculum:
-    # it pays exp(-d/std) for *being* near a victim, which is maximised by arriving and then
-    # standing still, while ``terrain_levels_vel`` demotes any env that walks less than half
-    # its commanded distance. Measured at 4096 envs: terrain_levels fell 0.68 -> 0.38 between
-    # iterations 100 and 200 (baseline reaches ~5.3), with the victim terms summing to 0.449
-    # of episode reward against 0.380 for track_lin_vel_xy_exp. The robot learned to loiter
-    # on flat ground. At 0.25 the term contributes ~0.085 and no longer outbids locomotion.
     #
-    # ponytail: weight cut is the cheap fix; the principled one is to pay for *closing*
-    # distance rather than being close -- e.g. project root_lin_vel_w onto the unit vector
-    # toward the nearest victim, which is stateless and pays exactly zero for standing still.
-    # Do that if 0.25 still distorts the curriculum.
-    victim_proximity = RewTerm(
-        func=rescue_mdp.victim_proximity_exp,
-        weight=0.25,
-        params={"std": 2.0, "victim_names": VICTIM_ASSET_NAMES},
+    # The old ``victim_proximity_exp`` is gone. It paid exp(-d/std) for *being* near a
+    # victim, maximised by arriving and standing still -- and standing still is what
+    # ``terrain_levels_vel`` demotes, so at weight 1.0 it collapsed the terrain curriculum
+    # (measured: levels 0.68 -> 0.38 over 100 iterations, against a baseline of ~5.3).
+    # Cutting it to 0.25 stopped the collapse but left the deeper problem: a "be close"
+    # reward pays nothing for *searching*, and reads privileged ground-truth positions, so
+    # the sensors stayed decorative.
+    #
+    # The pair below is the search task proper:
+    #   approach -- dense, stateless, pays only for closing distance, and only toward a
+    #               victim inside sensor range. Zero for standing still, zero for a victim
+    #               the robot could not have detected. This is what makes the LiDAR and
+    #               thermal camera load-bearing.
+    #   found    -- sparse, the actual objective. Small radius so it cannot be farmed at
+    #               range the way a smooth kernel can.
+    victim_approach = RewTerm(
+        func=rescue_mdp.victim_approach_rate,
+        weight=0.5,
+        params={"victim_names": VICTIM_ASSET_NAMES, "detect_range": LIDAR_MAX_RANGE},
     )
+    victim_found = RewTerm(
+        func=rescue_mdp.victim_found,
+        weight=2.0,
+        params={"victim_names": VICTIM_ASSET_NAMES, "found_radius": 1.0},
+    )
+    # Halved from 0.5: with approach+found carrying the objective, heading is only a nudge
+    # to face the target rather than a second way to earn for holding a pose.
     victim_heading = RewTerm(
         func=rescue_mdp.victim_heading_exp,
-        weight=0.5,
+        weight=0.25,
         params={"std": 0.8, "victim_names": VICTIM_ASSET_NAMES, "max_distance": 6.0},
     )
 
