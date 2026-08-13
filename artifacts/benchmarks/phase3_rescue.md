@@ -158,6 +158,46 @@ Priority order the measurement implies:
 2. **`detect_range` 10 m vs thermal 8 m.** Correctness fix, small expected effect on success.
 3. Thermal resolution / FOV. No evidence yet that either is binding.
 
+### Experiment: freeze the terrain curriculum — mostly a negative result
+
+Hypothesis: `mdp.terrain_levels_vel` promotes a robot whenever it tracks velocity well, so by
+construction it parks every robot at the edge of its competence and holds it there. A ~40%
+fall rate is not a bug in that design, it *is* that design. Freezing the curriculum should let
+the policy consolidate at a stationary difficulty and fall less.
+
+Run `anymal_c_rescue/2026-08-13_19-20-52`, 1000 iterations resumed from `model_3198.pt` with
+the hydra override `env.curriculum.terrain_levels=null`. Override confirmed live, not merely
+typed: the log reports `<CurriculumManager> contains 0 active terms` and `terrain_levels`
+appears 0 times, against 1201 times in `stage2.log`.
+
+| Metric | Stage 2 (curriculum on) | Frozen curriculum | Change |
+|---|---|---|---|
+| Fall rate | 0.4141 | **0.3906** | −0.0235 |
+| Victim-find success | 0.3867 | **0.3867** | none |
+| Mean time to find | 5.49 s | 4.63 s | −0.86 s |
+| Mean episode length | 759.1 | 780.6 | +21.5 |
+| Terrain tier evaluated on | 3.434 | 3.359 | comparable |
+
+**Read this as a near-null result, not a win.** Fall rate moved 2.4 points on 256 episodes —
+around the noise floor for that sample size — and success rate did not move at all. 1000
+iterations of consolidation did not meaningfully stabilise the robot, which means the
+curriculum is not the dominant source of falls. The honest conclusion is that the hypothesis
+was largely wrong.
+
+What that leaves, in order of what the evidence now supports:
+
+1. **The disturbance events.** `push_robot` and `base_external_force_torque` shove the robot
+   throughout training and are active in every number above. `AnymalCRescueEnvCfg_PLAY`
+   disables them; measuring eval fall rate under PLAY would separate "cannot stay upright on
+   terrain" from "is being actively shoved", and that has not been measured yet. Cheapest
+   next experiment by a wide margin.
+2. **Reward weights.** No penalty scales with base contact beyond termination itself.
+3. Terrain generator mix — the rubble tiers may simply be beyond an 0.30 m-clearance robot.
+
+The modest gains that *did* appear (time-to-find −0.86 s, episode length +21.5 steps) are
+consistent with a slightly more settled gait, which is worth keeping. The frozen checkpoint
+`model_4197.pt` is therefore the one used for the demo video.
+
 ### Known blind spot, measured not guessed
 
 The thermal camera sits 0.22 m above the trunk (~0.79 m up) pitched 15 deg down, with a
@@ -189,7 +229,36 @@ tensorboard --logdir artifacts/checkpoints/anymal_c_rescue
 No static plots are committed — the event files are the source of truth and TensorBoard
 already renders them.
 
-## Demo video
+## Demo video — three sensor views
+
+`artifacts/videos/rescue_demo_v2.mp4` (and `_v3` if a clean take was found), 1640x720:
+
+```
++---------------------------+--------+
+|                           | THERMAL|   chase   1280x720
+|      CHASE CAM 1280x720   | 360x360|   thermal  360x360   16x16 upscaled, ironbow
+|                           +--------+   lidar    360x360   bird's-eye scope
+|                           | LIDAR  |
++---------------------------+--------+
+```
+
+The LiDAR panel plots hits rotated into the robot frame, coloured by height rather than
+range — the fan is tilted down, so on open ground a range-coloured scope is a bland ring of
+floor returns, while height separates steps, rubble and casualties from the floor itself.
+Misses come back as `inf` and are dropped rather than drawn at max range, which would paint a
+fake wall around the robot.
+
+**Recorded on `Isaac-Rescue-Anymal-C-Play-v0`**, which disables `push_robot`,
+`base_external_force_torque` and observation corruption. That is the standard Isaac Lab
+inspection variant and normal practice for a demo, but it is stated here rather than implied:
+the robot is visibly steadier on video than the 0.39 eval fall rate would suggest, and that
+gap is the disabled disturbances, not extra skill.
+
+The renderer writes `summary.json` per take (`found_victim`, `fell`) and re-rolls the seed
+looking for a clean run, so the video is a representative successful episode rather than
+whichever episode luck dealt — also stated rather than implied.
+
+## Earlier two-panel demo
 
 `artifacts/videos/` — chase camera parented to the robot's base prim, with the 16x16 thermal
 view composited beside it and the voice-comms caption burned in on casualty contact.
