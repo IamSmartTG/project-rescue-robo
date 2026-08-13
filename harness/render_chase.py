@@ -78,6 +78,16 @@ env_cfg.scene.chase_camera = CameraCfg(
     renderer_cfg=IsaacRtxRendererCfg(),
 )
 
+# The chase camera renders pure black in any task that also carries the thermal camera,
+# while working fine in the camera-free task. Per-camera IsaacRtxRendererCfg did not fix it,
+# so the remaining theory is that the RTX renderer only produces a colour AOV when some
+# camera asks for one -- and the thermal camera asks only for semantic_segmentation.
+# Requesting rgb there too is the cheap test of that.
+_thermal_cfg = getattr(env_cfg.scene, "thermal_camera", None)
+if _thermal_cfg is not None and "rgb" not in _thermal_cfg.data_types:
+    _thermal_cfg.data_types = list(_thermal_cfg.data_types) + ["rgb"]
+    print("[INFO] added 'rgb' to thermal camera data_types (black-panel workaround test)")
+
 agent_cfg = load_cfg_from_registry(args.task, "rsl_rl_cfg_entry_point")
 # Same shim play.py applies. Without it the runner passes a 'stochastic' kwarg that this
 # rsl-rl version's MLPModel does not accept, and construction dies with a TypeError.
