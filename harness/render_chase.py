@@ -33,6 +33,7 @@ simulation_app = app_launcher.app
 
 # Imported only after the app exists -- Isaac Lab runtime classes segfault if imported
 # before SimulationApp (cost us an exit-139 earlier in this project).
+import json  # noqa: E402
 import os  # noqa: E402
 
 import gymnasium as gym  # noqa: E402
@@ -119,8 +120,40 @@ if thermal_cam is not None:
     print("[INFO] thermal camera present -- rendering side-by-side composite")
 
 
+def _ironbow_lut() -> np.ndarray:
+    """256-entry black -> purple -> red -> orange -> yellow -> white ramp.
+
+    Grayscale is technically honest but reads as a black square on screen, which made the
+    thermal panel look broken rather than cold. Real thermal cameras ship an ironbow palette
+    for exactly this reason. Built with np.interp so it costs nothing and adds no dependency
+    -- matplotlib for one gradient would be absurd.
+    """
+    stops = [0.0, 0.25, 0.5, 0.75, 1.0]
+    r = [0, 60, 200, 255, 255]
+    g = [0, 0, 40, 170, 255]
+    b = [0, 90, 40, 20, 220]
+    x = np.linspace(0.0, 1.0, 256)
+    return np.stack([np.interp(x, stops, c) for c in (r, g, b)], axis=1).astype(np.uint8)
+
+
+_LUT = _ironbow_lut()
+
+
+def _label(img, text, x, y):
+    """Small caption used to mark each panel, so the split screen explains itself."""
+    from PIL import ImageDraw, ImageFont
+
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 20)
+    except OSError:
+        font = ImageFont.load_default()
+    d = ImageDraw.Draw(img)
+    d.rectangle([x - 8, y - 6, x + 9 * len(text) + 8, y + 26], fill=(0, 0, 0))
+    d.text((x, y), text, fill=(235, 235, 235), font=font)
+
+
 def _composite(rgb_frame: np.ndarray) -> np.ndarray:
-    """Chase view on the left, upscaled thermal view on the right."""
+    """Chase view on the left, upscaled false-colour thermal view on the right."""
     if thermal_cam is None or _thermal_utils is None:
         return rgb_frame
     from PIL import Image
@@ -133,11 +166,47 @@ def _composite(rgb_frame: np.ndarray) -> np.ndarray:
     h = rgb_frame.shape[0]
     # NEAREST on purpose: the thermal sensor really is 16x16, and smoothing it would
     # misrepresent the resolution the policy actually receives.
-    panel = Image.fromarray(gray).convert("RGB").resize((h, h), Image.NEAREST)
+    panel = Image.fromarray(_LUT[gray]).resize((h, h), Image.NEAREST)
     out = np.zeros((h, rgb_frame.shape[1] + h, 3), dtype=np.uint8)
     out[:, : rgb_frame.shape[1]] = rgb_frame
     out[:, rgb_frame.shape[1] :] = np.asarray(panel)
     return out
+
+# Voice communication (plan Phase 4, item 14). Explicitly NOT part of the RL loop: the
+# policy is never rewarded for talking. This is the radio interface bolted on top -- on
+# reaching a casualty the robot emits a scripted call, logged as JSONL and burned into the
+# frame so the demo video shows it happening.
+#
+# The trigger reuses the reward manager's own victim_found term rather than re-deriving
+# "found" here. Calling the configured term with its configured params means the caption
+# cannot drift from the Episode_Reward/victim_found metric it is supposed to illustrate.
+_VOICE_LINE = "CASUALTY LOCATED - relaying position to base"
+_found_term = None
+try:
+    _found_term = env.unwrapped.reward_manager.get_term_cfg("victim_found")
+except (AttributeError, ValueError):
+    print("[WARN] no victim_found reward term -- voice comms disabled for this task")
+
+_hold_frames = int(round(2.0 / env.unwrapped.step_dt))  # caption dwells ~2 s
+_hold = 0
+_was_found = False
+_voice_log = open(f"{args.out}/voice_log.jsonl", "w")
+
+
+def _caption(img):
+    """Burn the radio call into the frame. Bottom-left, on a dark band for legibility."""
+    from PIL import ImageDraw, ImageFont
+
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 26)
+    except OSError:
+        font = ImageFont.load_default()  # bitmap fallback; tiny but always present
+    draw = ImageDraw.Draw(img)
+    x, y = 24, img.height - 60
+    draw.rectangle([x - 12, y - 10, x + 620, y + 38], fill=(0, 0, 0))
+    draw.text((x, y), f"[VOICE] {_VOICE_LINE}", fill=(255, 96, 64), font=font)
+    return img
+
 
 saved = 0
 for step in range(args.steps):
@@ -145,15 +214,38 @@ for step in range(args.steps):
         actions = policy(obs)
         obs, _, dones, _ = env.step(actions)
 
+    if _found_term is not None:
+        found = bool(_found_term.func(env.unwrapped, **_found_term.params)[0] > 0.0)
+        # Rising edge only: victim_found stays 1.0 for every step the robot loiters inside
+        # found_radius, and a radio that repeats itself 50 times a second is noise.
+        if found and not _was_found:
+            _voice_log.write(
+                json.dumps({"step": step, "t": round(step * env.unwrapped.step_dt, 3), "msg": _VOICE_LINE})
+                + "\n"
+            )
+            _voice_log.flush()
+            print(f"[VOICE] t={step * env.unwrapped.step_dt:.2f}s {_VOICE_LINE}")
+            _hold = _hold_frames
+        _was_found = found
+
     rgb = cam.data.output["rgb"].torch  # (N, H, W, 3 or 4) uint8
     frame = _composite(rgb[0, ..., :3].cpu().numpy().astype(np.uint8))
     try:
         from PIL import Image
 
-        Image.fromarray(frame).save(f"{args.out}/f{saved:05d}.png")
+        img = Image.fromarray(frame)
+        if thermal_cam is not None:
+            _label(img, "CHASE CAM", 24, 24)
+            _label(img, "THERMAL 16x16", frame.shape[1] - img.height + 24, 24)
+        if _hold > 0:
+            img = _caption(img)
+            _hold -= 1
+        img.save(f"{args.out}/f{saved:05d}.png")
     except ImportError:
         np.save(f"{args.out}/f{saved:05d}.npy", frame)
     saved += 1
+
+_voice_log.close()
 
 print(f"[INFO] wrote {saved} frames to {args.out}")
 env.close()
