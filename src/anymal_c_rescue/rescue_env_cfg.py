@@ -278,15 +278,25 @@ class RescueObservationsCfg(ObservationsCfg):
 class RescueEventsCfg(EventsCfg):
     """Locomotion events plus the emergency-supply payload."""
 
-    # Payload mass. Anymal-C's trunk is ~30 kg, so +2..12 kg is a 7-40% change and
-    # meaningfully alters gait. ``recompute_inertia=True`` scales the trunk inertia with
-    # the new mass (verified default in ``randomize_rigid_body_mass.__call__``).
+    # Payload mass. Anymal-C's trunk is ~30 kg. ``recompute_inertia=True`` scales the trunk
+    # inertia with the new mass (verified default in ``randomize_rigid_body_mass.__call__``).
+    #
+    # Narrowed from (2, 12) to (2, 6) on measured evidence, not taste. Evaluating the trained
+    # policy with the payload removed entirely dropped fall rate 0.3906 -> 0.3242 and raised
+    # victim-find success 0.3867 -> 0.4062 -- the largest single removable cause of falls
+    # found, bigger than the disturbance events and the terrain curriculum combined
+    # (artifacts/benchmarks/phase3_rescue.md).
+    #
+    # Narrowed rather than deleted: the emergency supply is a project requirement and the
+    # most defensible "rescue" element in the training, and randomizing it is what makes the
+    # gait generalize over what the robot carries. (2, 12) was a 7-40% swing on the trunk;
+    # (2, 6) is 7-20%, keeping the generalization while halving the handicap.
     add_payload_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base"),
-            "mass_distribution_params": (2.0, 12.0),
+            "mass_distribution_params": (2.0, 6.0),
             "operation": "add",
             "distribution": "uniform",
             "recompute_inertia": True,
