@@ -24,6 +24,9 @@ parser.add_argument("--checkpoint", type=str, required=True)
 parser.add_argument("--num_envs", type=int, default=1)
 parser.add_argument("--steps", type=int, default=900)
 parser.add_argument("--out", type=str, default="chase")
+# Which episode you get is pure luck of the draw, and a demo of the robot faceplanting at
+# 3 s is not a demo. The driving script re-rolls this until it gets a usable take.
+parser.add_argument("--seed", type=int, default=42)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.enable_cameras = True  # the RTX renderer must be up for any camera to produce pixels
@@ -53,6 +56,7 @@ from rsl_rl.runners import OnPolicyRunner  # noqa: E402
 os.makedirs(args.out, exist_ok=True)
 
 env_cfg = parse_env_cfg(args.task, device=args.device, num_envs=args.num_envs)
+env_cfg.seed = args.seed
 
 # Chase camera: 2.6 m behind, 1.3 m up, pitched ~18 deg down.
 # convention="world" means forward is +X, so a negative x offset puts the camera behind the
@@ -119,6 +123,15 @@ if thermal_cam is not None:
     )
     print("[INFO] thermal camera present -- rendering side-by-side composite")
 
+lidar = env.unwrapped.scene.sensors.get("lidar")
+if lidar is not None:
+    from isaaclab.utils.math import quat_apply_inverse  # noqa: E402
+
+    print("[INFO] LiDAR present -- rendering bird's-eye scope panel")
+
+_PANEL = 360  # side of each right-hand panel; chase is 1280x720, so 2 stack exactly
+_LIDAR_MAX_RANGE = 10.0  # must match MultiMeshRayCasterCfg.max_distance
+
 
 def _ironbow_lut() -> np.ndarray:
     """256-entry black -> purple -> red -> orange -> yellow -> white ramp.
@@ -153,10 +166,64 @@ def _label(img, text, x, y):
     d.text((x, y), text, fill=(235, 235, 235), font=font)
 
 
-def _composite(rgb_frame: np.ndarray) -> np.ndarray:
-    """Chase view on the left, upscaled false-colour thermal view on the right."""
-    if thermal_cam is None or _thermal_utils is None:
-        return rgb_frame
+def _lidar_panel():
+    """Bird's-eye scope of the 288-ray LiDAR, robot at centre, forward pointing up.
+
+    A 360-degree sensor has no meaningful "POV image", so a top-down scope is the honest
+    rendering -- it is also what an operator console would actually show. Hits are rotated
+    out of world frame into the robot's own frame, so the plot stays stable while the robot
+    turns instead of spinning with it.
+
+    Deliberately not built on rescue_mdp.lidar_ranges: that returns normalized scalar ranges
+    for the policy and throws away the bearing, which is the only thing a scope needs.
+    """
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (_PANEL, _PANEL), (8, 12, 16))
+    d = ImageDraw.Draw(img)
+    c = _PANEL // 2
+    scale = (_PANEL / 2 - 15) / _LIDAR_MAX_RANGE  # px per metre
+
+    for ring_m in (2.0, 5.0, 10.0):
+        r = ring_m * scale
+        d.ellipse([c - r, c - r, c + r, c + r], outline=(38, 52, 62))
+
+    hits_w = lidar.data.ray_hits_w.torch[0]  # (rays, 3)
+    pos_w = lidar.data.pos_w.torch[0]  # (3,)
+    quat_w = lidar.data.quat_w.torch[0]  # (4,)
+    rel = hits_w - pos_w.unsqueeze(0)
+    local = quat_apply_inverse(quat_w.unsqueeze(0).expand(rel.shape[0], 4), rel)
+
+    # Misses come back as inf hit positions; a saturated ray carries no information about
+    # the world, so drawing it at max range would paint a fake wall around the robot.
+    finite = torch.isfinite(local).all(dim=-1)
+    pts = local[finite].cpu().numpy()
+    xy, z = pts[:, :2], pts[:, 2]
+    rng = np.linalg.norm(xy, axis=1)
+    keep = rng < _LIDAR_MAX_RANGE * 0.99
+    xy, z = xy[keep], z[keep]
+
+    # Colour by height, not by range. The fan is tilted down (-25 to +5 deg), so on open
+    # ground most rays come back as a bland ring of floor hits and a range-coloured scope
+    # is mostly decoration. Height separates what the robot has to walk around -- steps,
+    # rubble, casualties -- from the floor it walks on. Sensor sits ~0.75 m up, so ground
+    # returns land near z = -0.75 and anything raised climbs toward 0.
+    for (fx, fy), pz in zip(xy, z):
+        # Robot frame is x forward, y left. Screen is y down, x right -- so forward maps to
+        # -screen_y and left maps to -screen_x.
+        px = c - fy * scale
+        py = c - fx * scale
+        t = float(np.clip((pz + 0.80) / 0.80, 0.0, 1.0))  # 0 = floor, 1 = raised
+        colour = (int(40 + 215 * t), int(120 + 135 * t), int(110 * (1.0 - t) + 40))
+        r_px = 1.4 + 1.2 * t  # raised hits drawn larger so they read at a glance
+        d.ellipse([px - r_px, py - r_px, px + r_px, py + r_px], fill=colour)
+
+    d.polygon([(c, c - 9), (c - 6, c + 7), (c + 6, c + 7)], fill=(235, 235, 235))
+    return img
+
+
+def _thermal_panel():
+    """False-colour 16x16 pseudo-thermal image, upscaled to the panel size."""
     from PIL import Image
 
     seg = thermal_cam.data.output["semantic_segmentation"].torch
@@ -164,14 +231,45 @@ def _composite(rgb_frame: np.ndarray) -> np.ndarray:
         _thermal_utils.segmentation_to_temperature(seg)
     )[0]
     gray = (norm.clamp(0.0, 1.0).cpu().numpy() * 255).astype(np.uint8)
-    h = rgb_frame.shape[0]
     # NEAREST on purpose: the thermal sensor really is 16x16, and smoothing it would
     # misrepresent the resolution the policy actually receives.
-    panel = Image.fromarray(_LUT[gray]).resize((h, h), Image.NEAREST)
-    out = np.zeros((h, rgb_frame.shape[1] + h, 3), dtype=np.uint8)
-    out[:, : rgb_frame.shape[1]] = rgb_frame
-    out[:, rgb_frame.shape[1] :] = np.asarray(panel)
+    return Image.fromarray(_LUT[gray]).resize((_PANEL, _PANEL), Image.NEAREST)
+
+
+def _composite(rgb_frame: np.ndarray) -> np.ndarray:
+    """Chase view left; thermal POV and LiDAR scope stacked in a right-hand column.
+
+    Three views because the robot has three ways of perceiving and a demo that shows only
+    the outside view proves nothing about the sensors. Panel size is chosen so two of them
+    stack to exactly the chase camera's 720 px height -- no letterbox bars, no stretching.
+    """
+    panels = []
+    if thermal_cam is not None and _thermal_utils is not None:
+        panels.append(("THERMAL 16x16", _thermal_panel()))
+    if lidar is not None:
+        panels.append(("LIDAR 288 rays", _lidar_panel()))
+    if not panels:
+        return rgb_frame
+
+    h, w = rgb_frame.shape[0], rgb_frame.shape[1]
+    out = np.zeros((h, w + _PANEL, 3), dtype=np.uint8)
+    out[:, :w] = rgb_frame
+    for i, (_, panel) in enumerate(panels):
+        y = i * _PANEL
+        if y + _PANEL <= h:
+            out[y : y + _PANEL, w:] = np.asarray(panel)
     return out
+
+
+def _panel_labels(img, chase_w):
+    """Label each right-column panel in place, matching _composite's stacking order."""
+    names = []
+    if thermal_cam is not None and _thermal_utils is not None:
+        names.append("THERMAL 16x16")
+    if lidar is not None:
+        names.append("LIDAR 288 rays")
+    for i, name in enumerate(names):
+        _label(img, name, chase_w + 12, i * _PANEL + 12)
 
 # Voice communication (plan Phase 4, item 14). Explicitly NOT part of the RL loop: the
 # policy is never rewarded for talking. This is the radio interface bolted on top -- on
@@ -214,11 +312,21 @@ def _caption(img):
     return img
 
 
+# Episode outcome, so the chain driving this can retry a bad take instead of shipping a
+# demo of the robot falling over 3 s in. Written to summary.json at the end.
+_ep_found = False
+_ep_fell = False
+_term_mgr = env.unwrapped.termination_manager
+_has_fall_term = "base_contact" in _term_mgr.active_terms
+
 saved = 0
 for step in range(args.steps):
     with torch.inference_mode():
         actions = policy(obs)
         obs, _, dones, _ = env.step(actions)
+
+    if _has_fall_term and bool(dones[0]) and bool(_term_mgr.get_term("base_contact")[0]):
+        _ep_fell = True
 
     if _found_term is not None:
         found = bool(_found_term.func(env.unwrapped, **_found_term.params)[0] > 0.0)
@@ -232,17 +340,18 @@ for step in range(args.steps):
             _voice_log.flush()
             print(f"[VOICE] t={step * env.unwrapped.step_dt:.2f}s {_VOICE_LINE}")
             _hold = _hold_frames
+            _ep_found = True
         _was_found = found
 
     rgb = cam.data.output["rgb"].torch  # (N, H, W, 3 or 4) uint8
+    chase_w = rgb.shape[2]
     frame = _composite(rgb[0, ..., :3].cpu().numpy().astype(np.uint8))
     try:
         from PIL import Image
 
         img = Image.fromarray(frame)
-        if thermal_cam is not None:
-            _label(img, "CHASE CAM", 24, 24)
-            _label(img, "THERMAL 16x16", frame.shape[1] - img.height + 24, 24)
+        _label(img, "CHASE CAM", 24, 24)
+        _panel_labels(img, chase_w)
         if _hold > 0:
             img = _caption(img)
             _hold -= 1
@@ -253,6 +362,20 @@ for step in range(args.steps):
 
 _voice_log.close()
 
-print(f"[INFO] wrote {saved} frames to {args.out}")
+with open(f"{args.out}/summary.json", "w") as f:
+    json.dump(
+        {
+            "task": args.task,
+            "checkpoint": args.checkpoint,
+            "seed": args.seed,
+            "steps": saved,
+            "found_victim": _ep_found,
+            "fell": _ep_fell,
+        },
+        f,
+        indent=2,
+    )
+
+print(f"[INFO] wrote {saved} frames to {args.out} | found={_ep_found} fell={_ep_fell}")
 env.close()
 simulation_app.close()
