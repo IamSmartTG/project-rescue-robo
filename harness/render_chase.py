@@ -148,7 +148,8 @@ def _label(img, text, x, y):
     except OSError:
         font = ImageFont.load_default()
     d = ImageDraw.Draw(img)
-    d.rectangle([x - 8, y - 6, x + 9 * len(text) + 8, y + 26], fill=(0, 0, 0))
+    left, top, right, bottom = d.textbbox((x, y), text, font=font)
+    d.rectangle([left - 8, top - 6, right + 8, bottom + 6], fill=(0, 0, 0))
     d.text((x, y), text, fill=(235, 235, 235), font=font)
 
 
@@ -203,8 +204,13 @@ def _caption(img):
         font = ImageFont.load_default()  # bitmap fallback; tiny but always present
     draw = ImageDraw.Draw(img)
     x, y = 24, img.height - 60
-    draw.rectangle([x - 12, y - 10, x + 620, y + 38], fill=(0, 0, 0))
-    draw.text((x, y), f"[VOICE] {_VOICE_LINE}", fill=(255, 96, 64), font=font)
+    text = f"[VOICE] {_VOICE_LINE}"
+    # Measure the text instead of guessing a box width. A fixed width was wrong the moment
+    # the font or the message changed -- the first render ran the tail of the line off the
+    # end of its own background band.
+    left, top, right, bottom = draw.textbbox((x, y), text, font=font)
+    draw.rectangle([left - 12, top - 10, right + 12, bottom + 10], fill=(0, 0, 0))
+    draw.text((x, y), text, fill=(255, 96, 64), font=font)
     return img
 
 
