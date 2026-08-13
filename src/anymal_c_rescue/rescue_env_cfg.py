@@ -407,9 +407,20 @@ class AnymalCRescueEnvCfg(AnymalCRoughEnvCfg):
         # (uniform +2..12 kg) subsumes it, so the inherited term is disabled.
         self.events.add_base_mass = None
 
-        # tick the new sensors at the policy rate
+        # LiDAR ticks at the policy rate: warp raycasting is cheap and the ranges feed
+        # obstacle avoidance, which wants to be current.
         self.scene.lidar.update_period = self.decimation * self.sim.dt
-        self.scene.thermal_camera.update_period = self.decimation * self.sim.dt
+
+        # The camera ticks at a QUARTER of the policy rate. RTX rendering dominates
+        # iteration cost -- measured 5.2 s/iter at 2048 envs with the camera against
+        # 3.07 s/iter at 4096 envs without it -- so re-rendering every step is where the
+        # wall-clock goes. The cost of staleness is small: at most 3 steps (0.06 s), which
+        # is ~6 cm of robot travel at walking speed, and a casualty does not move. Review
+        # finding F7 recommended exactly this.
+        #
+        # The reward is unaffected either way: victim_approach_rate reads live physics
+        # positions gated by camera FOV, not the rendered image.
+        self.scene.thermal_camera.update_period = 4 * self.decimation * self.sim.dt
 
 
 @configclass
