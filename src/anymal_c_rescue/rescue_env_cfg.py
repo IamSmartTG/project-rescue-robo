@@ -85,8 +85,25 @@ drop height: the props are dynamic rigid bodies and settle onto the uneven terra
 LIDAR_MAX_RANGE: float = 10.0
 """LiDAR saturation range [m]. Must match the sensor ``max_distance`` and the observation."""
 
-THERMAL_RESOLUTION: tuple[int, int] = (64, 64)
-"""(width, height) of the pseudo-thermal camera. Small on purpose, for training throughput."""
+THERMAL_RESOLUTION: tuple[int, int] = (16, 16)
+"""(width, height) of the pseudo-thermal camera.
+
+Small for observation balance, not just throughput. At 64x64 the flattened image is 4096
+dims against 523 dims of proprioception + height scan + LiDAR -- 89% of the actor's input
+is the camera. Measured consequence at 2048 envs: 100% base_contact terminations, mean
+episode length degrading 14.6 -> 7.8 steps over 500 iterations, terrain_levels pinned at
+0.0, i.e. the policy never learned to walk at all. Most thermal pixels are constant ambient,
+and ``obs_normalization`` divides a near-zero variance into them, so the actor was fed
+mostly amplified noise and emitted near-random actions (a random-action ANYmal falls in
+~0.15 s, which is what 7.8 steps is).
+
+16x16 = 256 dims leaves proprioception dominant. A victim occupied ~3.6% of frame at 64x64,
+so it is still a ~9 px blob here, and at ~3.75 deg per pixel the bearing is good to ~11 deg
+-- ample for steering. Rendering 16x fewer pixels is a throughput bonus, not the reason.
+
+The principled alternative is a small CNN encoder over the image instead of flattening it
+into the MLP; that is the right answer if the resolution ever needs to go back up.
+"""
 
 VICTIM_ASSET_NAMES: tuple[str, ...] = ("victim_0", "victim_1", "victim_2")
 """Scene entity names of the victim props, used by the victim-search reward terms."""
