@@ -81,6 +81,43 @@ Two things about resume worth knowing before reading these logs:
   passing its pre-outage value. This is not a lost policy; a freshly initialized policy does
   not reach 15 in 34 iterations.
 
+## Phase 3 comparison — LiDAR-only rescue env (2026-08-13)
+
+`Isaac-Rescue-Anymal-C-NoCam-v0`, same 4096 envs / 24 steps per env, 20 iterations measured.
+
+| Metric | Baseline | Rescue (LiDAR, no camera) | Cost |
+|---|---|---|---|
+| Iteration time | ~2.40 s | ~3.07 s | +28% |
+| Throughput | ~41,000 steps/s | **~32,000 steps/s** | -22% |
+| Projected 1500 iters | ~53 min | **~77 min** | +24 min |
+
+Clean exit, zero errors. The sensor suite minus the camera costs about a fifth of
+throughput, so a full 1500-iteration rescue run fits comfortably before the deadline.
+
+This directly contradicts review finding F7's 5-15x slowdown projection — correctly, since
+that projection was driven by the thermal camera's 4096 x 64 x 64 segmentation render per
+policy step, which this variant does not do. 288 LiDAR rays x 4096 envs of warp raycasting
+is nearly free by comparison. F7's schedule warning still stands for the *camera* variant,
+which has never been measured because it cannot start (see below).
+
+### The thermal camera has never run
+
+`--enable_cameras` aborts at launch on this pod: `vkCreateInstance` fails, no GPU devices.
+CUDA is unaffected. Ruled out: driver version mismatch (kernel module and userspace both
+580.173.02), missing graphics libraries, a malformed ICD manifest, and a wrong device node.
+Untested best hypothesis: `/proc/driver/nvidia/gpus/` exposes all 8 host GPUs while only
+`/dev/nvidia2` exists in the container; no `CAP_MKNOD` to test it.
+
+### Separately: a SIGSEGV that was ours
+
+Both rescue variants first died with exit 134/139 at what looked like Isaac Sim startup.
+Root cause was `rescue_mdp.py` importing Isaac Lab's *runtime* classes (`Articulation`,
+`RigidObject`, `Camera`, `RayCaster`) at module scope. Those cannot be imported before
+`SimulationApp` exists, and hydra resolves the env cfg entry point before
+`launch_simulation` — so the process died during config resolution while every traceback
+pointed at `_create_app`. Fixed in 2f4c2d5 by moving them under `TYPE_CHECKING`, matching
+what `isaaclab_tasks`' own mdp modules do.
+
 ## Notes
 
 - `--headless` is deprecated in Isaac Sim 6.0; use `--viz none`.
