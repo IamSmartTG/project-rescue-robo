@@ -44,3 +44,15 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:AnymalCRescueNoCamPPORunnerCfg",
     },
 )
+
+# Stage 1 of two-stage training: same scene, same observations, victim rewards zeroed.
+# Shares the runner cfg so the checkpoint loads straight into the stage-2 run.
+gym.register(
+    id="Isaac-Rescue-Anymal-C-Locomotion-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.rescue_env_cfg:AnymalCRescueLocomotionEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:AnymalCRescuePPORunnerCfg",
+    },
+)

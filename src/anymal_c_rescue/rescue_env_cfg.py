@@ -447,3 +447,30 @@ class AnymalCRescueNoCamEnvCfg(AnymalCRescueEnvCfg):
         # set on it. Order matters: the parent's __post_init__ touches thermal_camera.
         self.scene.thermal_camera = None
         self.observations.thermal = None
+
+
+@configclass
+class AnymalCRescueLocomotionEnvCfg(AnymalCRescueEnvCfg):
+    """Stage 1 of two-stage training: identical scene and sensors, victim rewards off.
+
+    Learning to walk and to search at once does not work well here. Measured on the
+    single-stage run: the victim terms pull the robot toward casualties while
+    ``terrain_levels_vel`` promotes on distance walked, so the terrain curriculum stalled
+    near 0.16 against the 5.39 a pure-locomotion policy reaches. The result is a policy that
+    searches competently on easy ground and never sees hard terrain.
+
+    Stage 1 zeroes the victim rewards so the policy learns locomotion and terrain with the
+    full sensor suite attached. Stage 2 resumes from that checkpoint with the victim rewards
+    restored, so it only has to learn *search* on top of an already-competent walker.
+
+    Crucially the observation space is unchanged (proprioception + height scan + LiDAR +
+    thermal), so the stage-1 checkpoint loads directly into the stage-2 run. Training stage 1
+    on a cheaper camera-free task would change the actor's input width and make the
+    checkpoint unloadable.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.rewards.victim_approach.weight = 0.0
+        self.rewards.victim_found.weight = 0.0
+        self.rewards.victim_heading.weight = 0.0
