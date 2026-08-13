@@ -1,0 +1,11 @@
+{
+  "checkpoint": "/home/shadeform/isaac/IsaacLab/logs/rsl_rl/anymal_c_rescue/2026-08-13_16-24-03/model_3198.pt",
+  "task": "Isaac-Rescue-Anymal-C-v0",
+  "episodes": 256,
+  "success_rate": 0.3867,
+  "mean_time_to_find_s": 5.485,
+  "mean_episode_length_steps": 759.1,
+  "mean_episode_length_s": 15.18,
+  "fall_rate": 0.4141,
+  "mean_terrain_level": 3.434
+}
