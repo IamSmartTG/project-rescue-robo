@@ -44,7 +44,42 @@ effective batch size (which would likely require LR retuning).
 | Episode_Termination/base_contact | 0.99 |
 
 Robots fall almost immediately at this stage — expected for ANYmal rough terrain this early.
-Final values to be filled in on run completion.
+
+## Final result (iteration 1499/1500) — COMPLETE
+
+| Metric | Value |
+|---|---|
+| Final mean reward | **17.71** |
+| Mean reward @ iter 753 | 14.38 |
+| Mean reward @ iter 1350 (pre-outage) | 16.27 |
+| Exit status | `HARNESS_EXIT=0`, clean |
+| Errors / OOM / CUDA faults | 0 |
+| Final checkpoint | `logs/rsl_rl/anymal_c_rough/2026-08-13_07-56-55/model_1499.pt` |
+
+Reward was still climbing at 1500, so this is a usable baseline rather than a converged
+ceiling. Good enough as the Phase 3 comparison point; not worth more GPU time before the
+deadline.
+
+### Run was split across a pod outage
+
+Iterations 0–1365 ran 2026-08-12 in `2026-08-12_14-32-14`; the pod became unreachable
+mid-run. `/workspace` is a RunPod **network volume** (`mfs#eu-cz-1.runpod.net`), so the
+67 GB venv, the Isaac Lab install, and every checkpoint survived intact — the outage cost
+only the unfinished iterations, not the ~2 h rebuild a pod-local volume would have.
+
+Resumed 2026-08-13 from `model_1350.pt` into `2026-08-13_07-56-55` with
+`--resume --load_run 2026-08-12_14-32-14 --checkpoint model_1350.pt --max_iterations 150`.
+
+Two things about resume worth knowing before reading these logs:
+
+- **`max_iterations` is additive on resume, not absolute.** `OnPolicyRunner.learn` computes
+  `total_it = start_it + num_learning_iterations` with `start_it` from the checkpoint, so
+  150 means 1350 → 1500.
+- **Mean reward restarts near zero and climbs back over ~40 iterations.** It is the mean
+  over *completed* episodes, and resume resets every env, so the first episodes to finish
+  are the early terminations. Reward went -0.02 → 15.25 over the first 34 iterations before
+  passing its pre-outage value. This is not a lost policy; a freshly initialized policy does
+  not reach 15 in 34 iterations.
 
 ## Notes
 

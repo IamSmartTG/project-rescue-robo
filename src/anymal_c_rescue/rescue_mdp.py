@@ -125,6 +125,14 @@ def thermal_image(
     sensor: Camera = env.scene.sensors[sensor_cfg.name]
     # ``CameraData.output`` maps data type -> ProxyArray; ``.torch`` gives a zero-copy view.
     seg = sensor.data.output["semantic_segmentation"].torch  # (N, H, W, 4) uint8
+    # The buffer's layout depends on the renderer's colorization setting: (N,H,W,4) uint8
+    # when colorized, (N,H,W,1) int32 raw. The raw layout does not raise here -- seg[..., :3]
+    # would broadcast a single channel to three and hand back a plausible-looking image of
+    # pure garbage. Fail loudly instead; this path has never run on GPU.
+    assert seg.shape[-1] == 4 and seg.dtype == torch.uint8, (
+        f"expected colorized segmentation (N,H,W,4) uint8, got {tuple(seg.shape)} {seg.dtype}; "
+        "check colorize_semantic_segmentation on the renderer cfg"
+    )
     temperature = thermal.segmentation_to_temperature(seg)  # (N, H, W)
     normalized = thermal.normalize_temperature(temperature)
     if flatten:

@@ -32,3 +32,15 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:AnymalCRescuePPORunnerCfg",
     },
 )
+
+# Camera-free variant. Registered separately so the RTX-dependent env stays untouched;
+# see AnymalCRescueNoCamEnvCfg for why it exists.
+gym.register(
+    id="Isaac-Rescue-Anymal-C-NoCam-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.rescue_env_cfg:AnymalCRescueNoCamEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:AnymalCRescueNoCamPPORunnerCfg",
+    },
+)

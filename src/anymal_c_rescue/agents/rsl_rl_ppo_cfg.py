@@ -22,7 +22,11 @@ class AnymalCRescuePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """
 
     num_steps_per_env = 24
-    max_iterations = 3000
+    # 1500, matching the baseline -- not 3000. The sensor env renders 4096 x 64 x 64
+    # segmentation per policy step, so it runs several times slower than the 41k
+    # env-steps/s baseline; 3000 iterations projected to 9-26 h against an Aug 16 deadline.
+    # Raise it only after the measured throughput of a real run says it fits.
+    max_iterations = 1500
     save_interval = 50
     experiment_name = "anymal_c_rescue"
     obs_groups = {"actor": ["policy", "thermal"], "critic": ["policy", "thermal"]}
@@ -51,3 +55,11 @@ class AnymalCRescuePPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+
+@configclass
+class AnymalCRescueNoCamPPORunnerCfg(AnymalCRescuePPORunnerCfg):
+    """Runner for the camera-free variant: no ``thermal`` observation group exists."""
+
+    experiment_name = "anymal_c_rescue_nocam"
+    obs_groups = {"actor": ["policy"], "critic": ["policy"]}

@@ -53,14 +53,23 @@ from . import thermal as thermal_utils
 ##
 
 VICTIM_OFFSETS: tuple[tuple[float, float, float], ...] = (
-    (2.60, 1.40, 0.60),
-    (-2.10, 2.55, 0.60),
-    (0.60, -2.80, 0.60),
+    (2.60, 1.40, 2.00),
+    (-2.10, 2.55, 2.00),
+    (0.60, -2.80, 2.00),
 )
 """Victim prop spawn positions as (x, y, z) offsets from each environment origin [m].
 
 Kept inside the 8 x 8 m terrain patch produced by ``ROUGH_TERRAINS_CFG``. The z value is a
 drop height: the props are dynamic rigid bodies and settle onto the uneven terrain.
+
+.. important::
+    z is 2.0, not a snug 0.6, because ``env_origins`` is the patch **centre** height while
+    the victims sit ~2.9-3.3 m out from it. ``ROUGH_TERRAINS_CFG`` includes pyramid stairs
+    and slopes whose relief reaches 1-2 m at that radius, so a 0.6 m drop spawned the box
+    *inside* the terrain on inverted patches -- interpenetration, which the solver answers
+    by ejecting a 45 kg body. Dropping from clear above costs a 0.64 s fall at episode
+    start. The exact fix is to sample terrain height at the drawn xy, which needs a custom
+    event term; not worth it until this is seen to be insufficient.
 
 .. important::
     The props are :class:`RigidObjectCfg`, *not* static :class:`AssetBaseCfg` prims, and each
@@ -135,11 +144,18 @@ class RescueSceneCfg(MySceneCfg):
         offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.18)),
         ray_alignment="base",
         pattern_cfg=patterns.LidarPatternCfg(
-            channels=4,
-            vertical_fov_range=(-15.0, 15.0),
+            # The fan is tilted DOWN, not centred on the horizon. Sensor height is
+            # ~0.75 m (base ~0.57 + 0.18 offset) and a victim is a 0.28 m box, so a
+            # symmetric (-15, +15) fan put its two upper beams permanently in the sky and
+            # left a blind band from 2.80 m (where the -15 beam hits ground) out to
+            # 5.37 m (where the -5 beam first clears the box top) -- exactly the 2.86-3.30 m
+            # band the victims spawn in. (-25, +5) over 8 channels gives ~4.3 deg spacing
+            # and continuous coverage from ~1.0 m to beyond LIDAR_MAX_RANGE.
+            channels=8,
+            vertical_fov_range=(-25.0, 5.0),
             horizontal_fov_range=(-180.0, 180.0),
             horizontal_res=10.0,
-        ),  # -> 4 x 36 = 144 rays (the 360-deg wrap-around ray is dropped by lidar_pattern)
+        ),  # -> 8 x 36 = 288 rays (the 360-deg wrap-around ray is dropped by lidar_pattern)
         max_distance=LIDAR_MAX_RANGE,
         mesh_prim_paths=[
             MultiMeshRayCasterCfg.RaycastTargetCfg(prim_expr="/World/ground", track_mesh_transforms=False),
@@ -164,7 +180,11 @@ class RescueSceneCfg(MySceneCfg):
         data_types=["semantic_segmentation"],
         width=THERMAL_RESOLUTION[0],
         height=THERMAL_RESOLUTION[1],
-        spawn=sim_utils.PinholeCameraCfg(focal_length=18.0, clipping_range=(0.05, 20.0)),
+        # Far clip is 8.0, not 20.0: terrain patches are 8x8 m on one continuous ground
+        # mesh, so a 20 m far plane rendered ~2.5 patches in every direction and filled the
+        # segmentation buffer with neighbouring envs' robots and victims -- heat sources
+        # this env is never rewarded for reaching.
+        spawn=sim_utils.PinholeCameraCfg(focal_length=18.0, clipping_range=(0.05, 8.0)),
         renderer_cfg=IsaacRtxRendererCfg(
             semantic_filter=thermal_utils.SEMANTIC_FILTER,
             colorize_semantic_segmentation=True,
@@ -251,7 +271,14 @@ class RescueEventsCfg(EventsCfg):
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "pose_range": {"yaw": (-3.1416, 3.1416)},
+            # x/y jitter is required for correctness, not variety. ROUGH_TERRAINS_CFG is
+            # 10 rows x 20 cols = 200 patches, so at num_envs=4096 roughly 20 envs share
+            # one env_origins row. With yaw-only randomization every one of those envs
+            # wrote its victim to the identical world position -- ~20 coincident 45 kg
+            # cuboids with a degenerate contact normal, re-stacked on every reset.
+            # +-1.0 m keeps all three inside the 8x8 m patch (worst case victim_2 reaches
+            # y = -3.8 against a 4.0 m half-width).
+            "pose_range": {"x": (-1.0, 1.0), "y": (-1.0, 1.0), "yaw": (-3.1416, 3.1416)},
             "velocity_range": {},
             "asset_cfg": SceneEntityCfg("victim_0"),
         },
@@ -260,7 +287,14 @@ class RescueEventsCfg(EventsCfg):
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "pose_range": {"yaw": (-3.1416, 3.1416)},
+            # x/y jitter is required for correctness, not variety. ROUGH_TERRAINS_CFG is
+            # 10 rows x 20 cols = 200 patches, so at num_envs=4096 roughly 20 envs share
+            # one env_origins row. With yaw-only randomization every one of those envs
+            # wrote its victim to the identical world position -- ~20 coincident 45 kg
+            # cuboids with a degenerate contact normal, re-stacked on every reset.
+            # +-1.0 m keeps all three inside the 8x8 m patch (worst case victim_2 reaches
+            # y = -3.8 against a 4.0 m half-width).
+            "pose_range": {"x": (-1.0, 1.0), "y": (-1.0, 1.0), "yaw": (-3.1416, 3.1416)},
             "velocity_range": {},
             "asset_cfg": SceneEntityCfg("victim_1"),
         },
@@ -269,7 +303,14 @@ class RescueEventsCfg(EventsCfg):
         func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "pose_range": {"yaw": (-3.1416, 3.1416)},
+            # x/y jitter is required for correctness, not variety. ROUGH_TERRAINS_CFG is
+            # 10 rows x 20 cols = 200 patches, so at num_envs=4096 roughly 20 envs share
+            # one env_origins row. With yaw-only randomization every one of those envs
+            # wrote its victim to the identical world position -- ~20 coincident 45 kg
+            # cuboids with a degenerate contact normal, re-stacked on every reset.
+            # +-1.0 m keeps all three inside the 8x8 m patch (worst case victim_2 reaches
+            # y = -3.8 against a 4.0 m half-width).
+            "pose_range": {"x": (-1.0, 1.0), "y": (-1.0, 1.0), "yaw": (-3.1416, 3.1416)},
             "velocity_range": {},
             "asset_cfg": SceneEntityCfg("victim_2"),
         },
@@ -349,3 +390,25 @@ class AnymalCRescueEnvCfg_PLAY(AnymalCRescueEnvCfg):
 
         # show the LiDAR hits
         self.scene.lidar.debug_vis = True
+
+
+@configclass
+class AnymalCRescueNoCamEnvCfg(AnymalCRescueEnvCfg):
+    """Rescue task with the pseudo-thermal camera removed.
+
+    This exists because of a pod limitation, not a design choice: the RTX renderer cannot
+    start on the current RunPod container (``vkCreateInstance`` fails -- the NVIDIA Vulkan
+    ICD loads and exports its entry point, but reports no usable device, while CUDA compute
+    is entirely healthy). ``--enable_cameras`` therefore aborts the process at launch.
+
+    LiDAR is warp raycasting on CUDA and needs no Vulkan, so this variant is the only way to
+    exercise the victim props, the corrected LiDAR geometry and the search rewards on GPU
+    while that is unresolved. Delete it once RTX rendering works.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Drop the camera itself, its observation group, and the update_period the parent
+        # set on it. Order matters: the parent's __post_init__ touches thermal_camera.
+        self.scene.thermal_camera = None
+        self.observations.thermal = None

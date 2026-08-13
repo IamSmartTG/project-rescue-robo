@@ -7,3 +7,5 @@ events.out.tfevents.*
 
 # SDD scratch workspace
 .superpowers/
+__pycache__/
+artifacts/benchmarks/train.log
