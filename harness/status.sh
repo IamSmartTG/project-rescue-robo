@@ -6,7 +6,10 @@
 
 set -uo pipefail
 
-LOG="${LOG:-/workspace/train.log}"
+# Which run to report on. Defaults to the rescue run; override for older ones:
+#   SESSION=phase2 LOG=/workspace/train.log ./harness/status.sh
+SESSION="${SESSION:-rescue}"
+LOG="${LOG:-/workspace/rescue.log}"
 
 echo "== pod =="
 runpod-port || { echo "  (API said no running pod -- it is stopped or terminated)"; exit 1; }
@@ -28,10 +31,10 @@ timeout 45 ssh -o BatchMode=yes runpod "
   nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv,noheader
 
   echo '== training =='
-  if tmux has-session -t phase2 2>/dev/null; then
-    echo '  tmux session phase2: ALIVE'
+  if tmux has-session -t '$SESSION' 2>/dev/null; then
+    echo "  tmux session $SESSION: ALIVE"
   else
-    echo '  tmux session phase2: not running'
+    echo "  tmux session $SESSION: not running"
   fi
 
   # HARNESS_EXIT is stamped by run_train.sh on any exit, so its absence while the

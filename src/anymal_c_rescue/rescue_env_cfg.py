@@ -322,9 +322,21 @@ class RescueRewardsCfg(RewardsCfg):
     """All locomotion reward terms (unchanged) plus victim-search shaping."""
 
     # -- victim search
+    # weight 0.25, not 1.0. At 1.0 this term collapsed the inherited terrain curriculum:
+    # it pays exp(-d/std) for *being* near a victim, which is maximised by arriving and then
+    # standing still, while ``terrain_levels_vel`` demotes any env that walks less than half
+    # its commanded distance. Measured at 4096 envs: terrain_levels fell 0.68 -> 0.38 between
+    # iterations 100 and 200 (baseline reaches ~5.3), with the victim terms summing to 0.449
+    # of episode reward against 0.380 for track_lin_vel_xy_exp. The robot learned to loiter
+    # on flat ground. At 0.25 the term contributes ~0.085 and no longer outbids locomotion.
+    #
+    # ponytail: weight cut is the cheap fix; the principled one is to pay for *closing*
+    # distance rather than being close -- e.g. project root_lin_vel_w onto the unit vector
+    # toward the nearest victim, which is stateless and pays exactly zero for standing still.
+    # Do that if 0.25 still distorts the curriculum.
     victim_proximity = RewTerm(
         func=rescue_mdp.victim_proximity_exp,
-        weight=1.0,
+        weight=0.25,
         params={"std": 2.0, "victim_names": VICTIM_ASSET_NAMES},
     )
     victim_heading = RewTerm(
