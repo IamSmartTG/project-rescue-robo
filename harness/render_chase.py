@@ -27,6 +27,23 @@ parser.add_argument("--out", type=str, default="chase")
 # Which episode you get is pure luck of the draw, and a demo of the robot faceplanting at
 # 3 s is not a demo. The driving script re-rolls this until it gets a usable take.
 parser.add_argument("--seed", type=int, default=42)
+# Spawn the casualty much further out than training does, so the video shows a search rather
+# than a two-second walk. Safe here and not in training: this renders ONE robot, so there is
+# no neighbouring 8x8 m patch to contaminate -- which is the only reason the training annulus
+# is capped at 3.8 m.
+#
+# 6.5 m is near the real ceiling, and the ceiling is the sensor, not the terrain. The thermal
+# camera's far clip is 8.0 m, so past that the casualty is not faint, it is absent, and the
+# robot is wandering blind until it stumbles into range. That films worse than an easy find,
+# not better. A ~20 s episode also has to cover scanning plus the approach.
+parser.add_argument(
+    "--victim_radius",
+    type=float,
+    nargs=2,
+    metavar=("MIN", "MAX"),
+    default=None,
+    help="override the victim spawn annulus [m], e.g. --victim_radius 5.0 6.5",
+)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.enable_cameras = True  # the RTX renderer must be up for any camera to produce pixels
@@ -57,6 +74,34 @@ os.makedirs(args.out, exist_ok=True)
 
 env_cfg = parse_env_cfg(args.task, device=args.device, num_envs=args.num_envs)
 env_cfg.seed = args.seed
+
+# Widen the search before the scene is built. Mutating the event term's params is the whole
+# change -- reset_victims_annulus already takes radius_range, so nothing new is needed.
+#
+# Note this is deliberately out of distribution: the policy trains at 2.5-3.8 m and is being
+# filmed at up to 6.5. The behaviour required is the same one it learned (turn, scan, walk at
+# the warm blob), just more of it, and the take-selection loop re-rolls the seed until it
+# finds a clean episode -- so a harder setup costs re-rolls, not the deliverable. Say so in
+# the write-up rather than implying the policy was trained for this range.
+if args.victim_radius is not None:
+    _reset_victims = getattr(env_cfg.events, "reset_victims", None)
+    if _reset_victims is None:
+        raise SystemExit("--victim_radius given but this task has no reset_victims event")
+    _r = (float(args.victim_radius[0]), float(args.victim_radius[1]))
+    if _r[0] >= _r[1]:
+        raise SystemExit(f"--victim_radius needs MIN < MAX, got {_r}")
+    # Past the thermal far clip the casualty simply is not in the image, so the search
+    # becomes a random walk. Warn rather than refuse -- it is a legitimate thing to film
+    # deliberately, just not by accident.
+    _far_clip = getattr(env_cfg.scene, "thermal_camera", None)
+    if _far_clip is not None and _r[1] > _far_clip.spawn.clipping_range[1]:
+        print(
+            f"[WARN] max radius {_r[1]} m exceeds the thermal far clip "
+            f"{_far_clip.spawn.clipping_range[1]} m -- the casualty will be invisible to the "
+            "sensor at spawn and the robot can only find it by wandering into range"
+        )
+    _reset_victims.params["radius_range"] = _r
+    print(f"[INFO] victim spawn annulus overridden to {_r[0]}-{_r[1]} m (training uses 2.5-3.8)")
 
 # Chase camera: 2.6 m behind, 1.3 m up, pitched ~18 deg down.
 # convention="world" means forward is +X, so a negative x offset puts the camera behind the
@@ -93,6 +138,48 @@ if _thermal_cfg is not None and "rgb" not in _thermal_cfg.data_types:
     _thermal_cfg.data_types = list(_thermal_cfg.data_types) + ["rgb"]
     print("[INFO] added 'rgb' to thermal camera data_types (black-panel workaround test)")
 
+# A second, higher-resolution thermal camera that exists only to be looked at.
+#
+# The policy's own thermal image is 16x16 and has to stay that way: at 64x64 the flattened
+# image is 4096 dims against ~523 of everything else, which collapsed training outright
+# (rescue_env_cfg.py THERMAL_RESOLUTION records the measurement -- episode length 19-24 ->
+# 7.76 steps, 100% base-contact). But a 16x16 buffer blown up to a 360 px panel reads as a
+# broken sensor rather than as a thermal camera, and nothing requires the *video* to display
+# the actor's own buffer.
+#
+# Safe because it is a scene sensor and nothing more: no observation term names "thermal_viz",
+# so it never reaches the observation manager and the checkpoint's input width is untouched.
+# Same mount, lens and clipping as the real sensor, so the view is the policy's view -- just
+# sampled finer. Deliberately semantic_segmentation only: this camera is never asked for an
+# rgb AOV, since the chase camera already forces one.
+_THERMAL_VIZ_RESOLUTION = (64, 64)
+if _thermal_cfg is not None:
+    # deepcopy, not a shared reference, for offset/spawn/renderer_cfg. The chase camera above
+    # is commented with the lesson: two cameras sharing one IsaacRtxRendererCfg is exactly how
+    # the black-panel bug behaved, and "give each camera its own renderer config" was the
+    # response. Passing _thermal_cfg.renderer_cfg straight through would hand the viz camera
+    # the *same object* the policy's camera holds and walk back into that. Same reasoning for
+    # spawn: PinholeCameraCfg is consumed to author a prim, and two prims sharing one spawn
+    # cfg is a mutation hazard for no benefit.
+    import copy  # noqa: E402
+
+    env_cfg.scene.thermal_viz = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/base/ThermalViz",
+        offset=copy.deepcopy(_thermal_cfg.offset),
+        # distance_to_image_plane as well as the segmentation: the radiometry below needs a
+        # per-pixel range to attenuate against, and the policy's camera does not render one.
+        data_types=["semantic_segmentation", "distance_to_image_plane"],
+        width=_THERMAL_VIZ_RESOLUTION[0],
+        height=_THERMAL_VIZ_RESOLUTION[1],
+        spawn=copy.deepcopy(_thermal_cfg.spawn),
+        # Every frame, unlike the policy's camera, which ticks at a quarter rate to save
+        # training throughput. A panel that updates once every four frames looks stuttery,
+        # and there is no throughput budget to protect in a single-robot render.
+        update_period=0.0,
+        renderer_cfg=copy.deepcopy(_thermal_cfg.renderer_cfg),
+    )
+    print(f"[INFO] added {_THERMAL_VIZ_RESOLUTION[0]}x{_THERMAL_VIZ_RESOLUTION[1]} viz-only thermal camera")
+
 agent_cfg = load_cfg_from_registry(args.task, "rsl_rl_cfg_entry_point")
 # Same shim play.py applies. Without it the runner passes a 'stochastic' kwarg that this
 # rsl-rl version's MLPModel does not accept, and construction dies with a TypeError.
@@ -122,6 +209,14 @@ if thermal_cam is not None:
         thermal as _thermal_utils,
     )
     print("[INFO] thermal camera present -- rendering side-by-side composite")
+
+# Draw the panel from the viz camera when it exists, else fall back to the policy's own
+# sensor, so this still works on a task that has no thermal_viz configured.
+_viz_cam = env.unwrapped.scene.sensors.get("thermal_viz")
+_panel_cam = _viz_cam if _viz_cam is not None else thermal_cam
+if _panel_cam is not None:
+    _THERMAL_PANEL_WH = (_panel_cam.cfg.width, _panel_cam.cfg.height)
+    print(f"[INFO] thermal panel drawn from {_THERMAL_PANEL_WH[0]}x{_THERMAL_PANEL_WH[1]} camera")
 
 lidar = env.unwrapped.scene.sensors.get("lidar")
 if lidar is not None:
@@ -222,18 +317,119 @@ def _lidar_panel():
     return img
 
 
-def _thermal_panel():
-    """False-colour 16x16 pseudo-thermal image, upscaled to the panel size."""
-    from PIL import Image
+# Radiometry for the *displayed* image only. See _apply_ir_realism.
+_IR_ATTENUATION_M = 12.0
+_IR_NETD_C = 0.35
+_IR_BLUR_PX = 0.6
 
-    seg = thermal_cam.data.output["semantic_segmentation"].torch
-    norm = _thermal_utils.normalize_temperature(
-        _thermal_utils.segmentation_to_temperature(seg)
-    )[0]
+
+def _apply_ir_realism(temp_c, dist_m):
+    """Make a class-LUT temperature image behave like an IR sensor reading.
+
+    ``thermal.py`` paints every casualty pixel a flat 36.5 C no matter how far away it is,
+    because it is a semantic-class lookup, not a radiometric model. That is fine as a policy
+    observation -- the network only needs a consistent signal -- but on screen it looks like
+    a diagram rather than a sensor, which is what prompted this.
+
+    Three effects, all cheap and all in the right direction:
+
+    * **Atmospheric attenuation.** Radiance falls off toward ambient with path length
+      (Beer-Lambert), so a distant casualty reads cooler than a near one. At the 12 m
+      attenuation length used here a body at 6.5 m retains ~58% of its contrast over
+      ambient -- visibly dimmer, still clearly there, which is the honest depiction of a
+      casualty near the edge of sensor range.
+    * **NETD.** Real microbolometers quote a noise-equivalent temperature difference,
+      typically 30-60 mK for good hardware. 0.35 C is deliberately worse than a real
+      camera: at 64x64 upscaled to 360 px, a physically accurate 0.05 C would be invisible,
+      and the point is to show that the sensor is noisy rather than to certify a datasheet.
+    * **Optical blur.** No lens resolves a step edge, so the sharp segmentation boundary is
+      softened slightly.
+
+    IMPORTANT: this runs on the viz camera only and never on the observation path. The
+    policy's thermal input must stay byte-identical to what it trained on, so
+    rescue_mdp.thermal_image and thermal.py are deliberately left alone. Do not be tempted
+    to "fix" the flat image at the source -- that invalidates every trained checkpoint.
+    """
+    ambient = _thermal_utils.AMBIENT_TEMPERATURE_C
+    # Attenuate contrast over ambient, not absolute temperature: an empty scene must stay at
+    # ambient rather than decaying toward absolute zero.
+    contrast = temp_c - ambient
+    if dist_m is not None:
+        # Reshape the depth AOV to match the temperature image rather than trusting its
+        # layout. distance_to_image_plane carries a trailing channel axis in some Isaac Lab
+        # versions and not others, and silently broadcasting (N,H,W) against (N,H,W,1)
+        # produces a (N,H,W,W) tensor that survives every arithmetic step and only explodes
+        # later, in PIL, as an unreadable "cannot handle this data type" -- which is exactly
+        # how this was found. Compare element counts and reshape; never rely on broadcast.
+        d = torch.nan_to_num(dist_m.to(temp_c.dtype), nan=1e3, posinf=1e3)
+        if d.shape != temp_c.shape:
+            if d.numel() == temp_c.numel():
+                d = d.reshape(temp_c.shape)
+            else:
+                print(
+                    f"[WARN] depth shape {tuple(d.shape)} incompatible with thermal "
+                    f"{tuple(temp_c.shape)} -- skipping distance attenuation"
+                )
+                d = None
+        if d is not None:
+            contrast = contrast * torch.exp(-d.clamp(min=0.0) / _IR_ATTENUATION_M)
+    out = ambient + contrast
+    if _IR_NETD_C > 0:
+        out = out + torch.randn_like(out) * _IR_NETD_C
+    return out
+
+
+def _thermal_panel():
+    """False-colour pseudo-thermal image, upscaled to the panel size."""
+    from PIL import Image, ImageFilter
+
+    seg = _panel_cam.data.output["semantic_segmentation"].torch
+    temp = _thermal_utils.segmentation_to_temperature(seg)
+    # Best-effort: the radiometry is decoration, the panel is the deliverable. An earlier
+    # version let a shape bug inside it abort the whole render, and twelve consecutive takes
+    # died for a cosmetic effect. Never again -- fall back to the flat image instead.
+    try:
+        _depth = _panel_cam.data.output.get("distance_to_image_plane")
+        temp = _apply_ir_realism(temp, _depth.torch if _depth is not None else None)
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad; nothing here is fatal
+        print(f"[WARN] IR realism failed ({exc}) -- rendering flat thermal image")
+        temp = _thermal_utils.segmentation_to_temperature(seg)
+    norm = _thermal_utils.normalize_temperature(temp)[0]
     gray = (norm.clamp(0.0, 1.0).cpu().numpy() * 255).astype(np.uint8)
-    # NEAREST on purpose: the thermal sensor really is 16x16, and smoothing it would
-    # misrepresent the resolution the policy actually receives.
-    return Image.fromarray(_LUT[gray]).resize((_PANEL, _PANEL), Image.NEAREST)
+    # The LUT indexes to (..., 3), so gray must be exactly 2-D or PIL gets an array it cannot
+    # read. Assert the shape here, where the cause is visible, rather than letting it surface
+    # as a type error three calls away.
+    if gray.ndim != 2:
+        raise RuntimeError(
+            f"thermal panel expected a 2-D image, got {gray.shape} -- "
+            f"camera is {_THERMAL_PANEL_WH[0]}x{_THERMAL_PANEL_WH[1]}"
+        )
+    # Interpolation follows the source resolution, and the reason is honesty rather than
+    # taste. NEAREST on a 16x16 buffer is deliberate: smoothing it would show the viewer
+    # detail the policy does not receive. At 64x64 that argument is gone -- the blocks are
+    # now an artefact of a 5.6x upscale rather than a property of the sensor -- so BILINEAR
+    # is the more faithful choice.
+    resample = Image.NEAREST if max(_THERMAL_PANEL_WH) <= 16 else Image.BILINEAR
+    img = Image.fromarray(_LUT[gray]).resize((_PANEL, _PANEL), resample)
+    # Optical blur, applied after the upscale so the radius is in display pixels. No lens
+    # resolves a step edge, and the segmentation buffer is all step edges. Skipped at 16x16,
+    # where NEAREST blocks are the honest depiction and softening them would misrepresent
+    # what the policy receives.
+    if _IR_BLUR_PX > 0 and max(_THERMAL_PANEL_WH) > 16:
+        img = img.filter(ImageFilter.GaussianBlur(_IR_BLUR_PX * _PANEL / _THERMAL_PANEL_WH[0]))
+    return img
+
+
+def _thermal_label() -> str:
+    """Panel caption, derived from the real camera rather than hardcoded.
+
+    Says VIZ whenever the panel is not the policy's own buffer, so the video can never be
+    read as a claim that the actor sees this resolution -- which is the exact claim the
+    THERMAL_RESOLUTION measurement disproves.
+    """
+    w, h = _THERMAL_PANEL_WH
+    tag = "VIZ" if _panel_cam is not thermal_cam else "POLICY"
+    return f"THERMAL {w}x{h} ({tag})"
 
 
 def _composite(rgb_frame: np.ndarray) -> np.ndarray:
@@ -245,7 +441,7 @@ def _composite(rgb_frame: np.ndarray) -> np.ndarray:
     """
     panels = []
     if thermal_cam is not None and _thermal_utils is not None:
-        panels.append(("THERMAL 16x16", _thermal_panel()))
+        panels.append((_thermal_label(), _thermal_panel()))
     if lidar is not None:
         panels.append(("LIDAR 288 rays", _lidar_panel()))
     if not panels:
@@ -265,7 +461,7 @@ def _panel_labels(img, chase_w):
     """Label each right-column panel in place, matching _composite's stacking order."""
     names = []
     if thermal_cam is not None and _thermal_utils is not None:
-        names.append("THERMAL 16x16")
+        names.append(_thermal_label())
     if lidar is not None:
         names.append("LIDAR 288 rays")
     for i, name in enumerate(names):
