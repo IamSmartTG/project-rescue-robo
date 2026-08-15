@@ -37,6 +37,12 @@ parser.add_argument("--no_disturbance", action="store_true")
 # The emergency-supply payload is carried in every measurement taken so far. 2-12 kg plus
 # randomized inertia on a ~30 kg trunk is a large handicap and an obvious fall suspect.
 parser.add_argument("--no_payload", action="store_true")
+# Without this, evaluating the Nav task measures the SCRIPTED SEEKER, not a trained
+# navigator: nothing calls set_delta(), so the residual stays at its initialised zeros. That
+# is exactly how the scripted baseline was produced -- and exactly how a "trained navigator"
+# result could silently be the baseline wearing a different label.
+parser.add_argument("--navigator_checkpoint", type=str, default=None)
+parser.add_argument("--inner_steps", type=int, default=5)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.enable_cameras = True  # the thermal sensor is part of the observation the policy expects
@@ -102,6 +108,29 @@ runner.load(args.checkpoint)
 policy = runner.get_inference_policy(device=env.unwrapped.device)
 print(f"[INFO] loaded checkpoint: {args.checkpoint}")
 
+_nav_policy = None
+_nav_cmd = None
+if args.navigator_checkpoint:
+    from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c_rescue.nav_env import (  # noqa: E402
+        NavigatorEnv,
+    )
+
+    _nav_cmd = env.unwrapped.command_manager.get_term("base_velocity")
+    if not hasattr(_nav_cmd, "set_delta"):
+        raise SystemExit(
+            f"--navigator_checkpoint given but base_velocity is {type(_nav_cmd).__name__}; "
+            "use the -Nav- task."
+        )
+    _nav_shim = NavigatorEnv(env, policy, _nav_cmd, args.inner_steps)
+    _nav_cfg = load_cfg_from_registry(args.task, "navigator_cfg_entry_point")
+    _nav_cfg = handle_deprecated_rsl_rl_cfg(_nav_cfg, metadata.version("rsl-rl-lib"))
+    _nav_runner = OnPolicyRunner(_nav_shim, _nav_cfg.to_dict(), log_dir=None, device=args.device)
+    _nav_runner.load(args.navigator_checkpoint)
+    _nav_policy = _nav_runner.get_inference_policy(device=env.unwrapped.device)
+    print(f"[INFO] navigator ACTIVE: {args.navigator_checkpoint}")
+else:
+    print("[INFO] no navigator -- measuring the scripted seeker (residual delta stays zero)")
+
 dev = env.unwrapped.device
 n = args.num_envs
 
@@ -136,6 +165,12 @@ else:
 
 found = torch.zeros(n, dtype=torch.bool, device=dev)
 fell_near_debris = torch.zeros(n, dtype=torch.bool, device=dev)
+# Fraction of steps on which the LiDAR shield vetoed forward motion. This distinguishes a
+# navigator that learned to avoid debris from one that merely gets rescued by the shield on
+# every approach -- without it, "learned obstacle avoidance" is an unfalsifiable claim.
+shield_steps = torch.zeros(n, device=dev)
+_shield_cmd = env.unwrapped.command_manager.get_term("base_velocity")
+_has_shield = hasattr(_shield_cmd, "shield_fired")
 find_step = torch.full((n,), -1, dtype=torch.long, device=dev)
 done_once = torch.zeros(n, dtype=torch.bool, device=dev)  # freeze stats after first episode
 ep_len = torch.zeros(n, dtype=torch.long, device=dev)
@@ -169,6 +204,8 @@ prev_pos = robot.data.root_pos_w.torch[:, :2].clone()
 
 for step in range(horizon):
     with torch.inference_mode():
+        if _nav_policy is not None and step % args.inner_steps == 0:
+            _nav_cmd.set_delta(_nav_policy(obs))
         actions = policy(obs)
         obs, _, dones, _ = env.step(actions)
 
@@ -185,6 +222,9 @@ for step in range(horizon):
     #                mattered for failed episodes (a found env is already excluded), and
     #                those contribute 0 to SPL -- but they do contribute to
     #                mean_path_length_m, which would otherwise be nonsense.
+    if _has_shield:
+        shield_steps += torch.where(live & _shield_cmd.shield_fired, 1.0, 0.0)
+
     cur_pos = robot.data.root_pos_w.torch[:, :2]
     moving = live & ~found & ~dones.bool()
     path_len += torch.where(moving, torch.norm(cur_pos - prev_pos, dim=-1), torch.zeros_like(path_len))
@@ -233,6 +273,7 @@ spl_score = spl_utils.spl(found.tolist(), path_len.tolist(), shortest)
 result = {
     "checkpoint": args.checkpoint,
     "task": args.task,
+    "navigator": args.navigator_checkpoint,
     "episodes": n,
     "victims": len(victim_names),
     "success_rate": round(succ, 4),
@@ -253,6 +294,11 @@ result = {
     if debris_names
     else None,
     "debris_props": len(debris_names),
+    # Mean fraction of live steps where the shield vetoed forward motion. High late in
+    # training means the policy is leaning on the shield rather than steering around debris.
+    "shield_veto_rate": round((shield_steps / ep_len.clamp(min=1).float()).mean().item(), 4)
+    if _has_shield
+    else None,
     "mean_terrain_level": round(env.unwrapped.scene.terrain.terrain_levels.float().mean().item(), 3)
     if getattr(env.unwrapped.scene, "terrain", None) is not None
     and getattr(env.unwrapped.scene.terrain, "terrain_levels", None) is not None

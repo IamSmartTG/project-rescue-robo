@@ -1,0 +1,18 @@
+{
+  "checkpoint": "logs/rsl_rl/anymal_c_rescue/2026-08-13_19-20-52/model_4197.pt",
+  "task": "Isaac-Rescue-Anymal-C-Nav-v0",
+  "episodes": 256,
+  "victims": 2,
+  "success_rate": 0.2109,
+  "spl_straight_line_proxy": 0.1561,
+  "mean_path_length_m": 6.06,
+  "mean_shortest_path_m": 1.91,
+  "mean_time_to_find_s": 5.417,
+  "mean_episode_length_steps": 630.5,
+  "mean_episode_length_s": 12.61,
+  "fall_rate": 0.5234,
+  "fall_rate_near_debris": 0.168,
+  "fall_rate_terrain_only": 0.3555,
+  "debris_props": 4,
+  "mean_terrain_level": 3.305
+}

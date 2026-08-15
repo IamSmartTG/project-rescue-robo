@@ -23,6 +23,7 @@ OUT=""
 STEPS=900
 TRIES=8
 RADIUS=""
+NAV_CKPT=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -32,6 +33,7 @@ while [ $# -gt 0 ]; do
         --steps) STEPS="$2"; shift 2 ;;
         --tries) TRIES="$2"; shift 2 ;;
         --victim_radius) RADIUS="$2 $3"; shift 3 ;;
+        --navigator_checkpoint) NAV_CKPT="$2"; shift 2 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -58,6 +60,7 @@ for try in $(seq 1 "${TRIES}"); do
         --seed "${SEED}" \
         --out "${DIR}" \
         ${RADIUS:+--victim_radius ${RADIUS}} \
+        ${NAV_CKPT:+--navigator_checkpoint "${NAV_CKPT}"} \
         --headless 2>&1 | grep -aE "victim spawn annulus|thermal panel|VOICE|Error|Traceback" || true
 
     [ -f "${DIR}/summary.json" ] || { echo "take ${try}: no summary.json, render failed"; continue; }

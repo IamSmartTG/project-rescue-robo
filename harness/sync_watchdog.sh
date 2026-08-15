@@ -32,7 +32,11 @@ while true; do
     # A sync failing is the normal case when the box is gone, which is exactly when this
     # script must keep running rather than exit -- the host may come back, and either way the
     # last successful pull is already safe on disk.
-    if HOST="${HOST}" "${HERE}/sync_artifacts.sh" >/tmp/sync_watchdog_last.log 2>&1; then
+    # sync_artifacts.sh lives at the REPO ROOT, not in harness/. Getting this wrong cost
+    # three silent sync cycles -- the watchdog dutifully reported "host unreachable?" when
+    # the host was fine and the script path was simply wrong. Worth noting the guess in the
+    # error message was misleading: a failed sync has more causes than a dead host.
+    if HOST="${HOST}" "${HERE}/../sync_artifacts.sh" >/tmp/sync_watchdog_last.log 2>&1; then
         newest="$(find "${HERE}/../artifacts/checkpoints" -name 'model_*.pt' -newermt '-35 minutes' 2>/dev/null | wc -l)"
         echo "[watchdog ${ts}] ok -- ${newest} checkpoint(s) new in the last 35 min"
     else

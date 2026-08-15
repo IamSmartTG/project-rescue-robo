@@ -644,3 +644,127 @@ class AnymalCRescueLocomotionEnvCfg(AnymalCRescueEnvCfg):
         self.rewards.victim_approach.weight = 0.0
         self.rewards.victim_found.weight = 0.0
         self.rewards.victim_heading.weight = 0.0
+
+
+##
+# Hierarchical navigator variant
+##
+
+
+@configclass
+class NavigatorObsCfg(ObsGroup):
+    """What the navigator sees: perception only.
+
+    No joint angles, no joint velocities, no gravity vector. Those are the walker's business
+    and would be noise in a policy whose entire output is three velocity numbers. Keeping the
+    group small is also what makes the navigator cheap to train.
+
+    ``history_length=4`` on the thermal image is the one non-obvious choice. It buys
+    short-term memory without a recurrent network: a casualty that slips behind a debris
+    block is still present in the recent frames, so the navigator can keep approaching
+    instead of reverting to a scan the instant it leaves view. An MLP on a single frame is
+    exactly as memoryless as the scripted seeker it is meant to improve on, which would make
+    the whole exercise pointless on a scene built around occlusion.
+
+    Note the 64x64 observation-dominance problem that broke the walker does NOT apply here --
+    see ``THERMAL_RESOLUTION``. That failure was 4096 camera dims drowning proprioception in a
+    policy that had to *walk*. Perception is this policy's whole job, so a thermal-heavy
+    observation is correct rather than dangerous.
+    """
+
+    thermal = ObsTerm(
+        func=rescue_mdp.thermal_image,
+        params={"sensor_cfg": SceneEntityCfg("thermal_camera"), "flatten": True},
+        history_length=4,
+        flatten_history_dim=True,
+    )
+    lidar = ObsTerm(
+        func=rescue_mdp.lidar_ranges,
+        params={"sensor_cfg": SceneEntityCfg("lidar"), "max_range": LIDAR_MAX_RANGE},
+        clip=(0.0, 1.0),
+    )
+
+    def __post_init__(self):
+        self.enable_corruption = False
+        self.concatenate_terms = True
+
+
+@configclass
+class AnymalCRescueNavEnvCfg(AnymalCRescueEnvCfg):
+    """Rescue task whose velocity command comes from the thermal camera, not from a RNG.
+
+    This is the fix for the finding in ``artifacts/benchmarks/phase3_rescue.md``: the task
+    inherited ``UniformVelocityCommand``, so the robot obeyed a random heading resampled every
+    10 s while the victim rewards nudged its gait. The sensors could never determine where it
+    went.
+
+    Set ``commands.base_velocity.use_residual = False`` to get the pure scripted seeker. That
+    is how the baseline row of the comparison is produced -- same code path, same scene, one
+    boolean different -- so the two numbers differ in exactly the thing being measured.
+    """
+
+    observations: RescueObservationsCfg = RescueObservationsCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        from .navigator import ResidualNavigatorCommandCfg
+
+        # Perception-only group for the navigator. Added alongside the existing groups rather
+        # than replacing them: the walker's obs_groups still name only "policy" and "thermal",
+        # so its input width is unchanged and model_4197.pt keeps loading.
+        self.observations.navigator = NavigatorObsCfg()
+
+        old = self.commands.base_velocity
+        self.commands.base_velocity = ResidualNavigatorCommandCfg(
+            # Carried over from the term being replaced, not re-typed. asset_name is MISSING
+            # on the parent config, so omitting it fails configclass validation at gym.make
+            # with a several-thousand-line config dump rather than a useful message -- copy
+            # every required field from `old` rather than listing the ones that seem relevant.
+            asset_name=old.asset_name,
+            camera_name="thermal_camera",
+            lidar_name="lidar",
+            # Inherited plumbing the parent still uses: resampling, standing envs, debug
+            # arrows. The random draw still happens and is then overwritten every step, which
+            # keeps a well-formed buffer available before the first image exists.
+            resampling_time_range=old.resampling_time_range,
+            rel_standing_envs=0.0,  # a rescue robot has no reason to stand idle
+            rel_heading_envs=old.rel_heading_envs,
+            heading_command=old.heading_command,
+            heading_control_stiffness=old.heading_control_stiffness,
+            debug_vis=old.debug_vis,
+            ranges=old.ranges,
+        )
+
+
+@configclass
+class AnymalCRescueNavEnvCfg_PLAY(AnymalCRescueNavEnvCfg):
+    """Inspection variant of the navigator task, for rendering demos.
+
+    This exists because ``make_demo.sh`` defaulted to ``Isaac-Rescue-Anymal-C-Play-v0``, which
+    inherits the ORIGINAL ``UniformVelocityCommand``. Rendering a trained navigator on that
+    task would show a robot obeying random headings and prove nothing about the policy -- a
+    video that looks plausible and means the opposite of what it claims. Point the renderer
+    here instead.
+
+    Mirrors ``AnymalCRescueEnvCfg_PLAY``: disturbances off and a smaller terrain grid, so the
+    take shows the policy rather than the randomisation. As with every demo in this project,
+    the write-up must state that the shoves are disabled.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.num_envs = 32
+        self.scene.env_spacing = 2.5
+        self.scene.terrain.max_init_terrain_level = None
+        if self.scene.terrain.terrain_generator is not None:
+            self.scene.terrain.terrain_generator.num_rows = 5
+            self.scene.terrain.terrain_generator.num_cols = 5
+            self.scene.terrain.terrain_generator.curriculum = False
+
+        self.observations.policy.enable_corruption = False
+        self.events.base_external_force_torque = None
+        self.events.push_robot = None
+
+        self.scene.lidar.debug_vis = True

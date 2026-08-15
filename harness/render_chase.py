@@ -47,6 +47,12 @@ parser.add_argument(
 # Opt-in, not default. The only render made with it produced a black chase panel and a blank
 # thermal panel -- see the long note at the thermal_viz camera. Verify a frame before trusting
 # a video made with this on.
+# Without this the renderer runs only the frozen walker. On the Nav task that means the
+# residual delta stays at its initialised zeros, so the video shows the SCRIPTED SEEKER while
+# a caption claims a trained navigator -- a plausible-looking artifact that means the opposite
+# of what it says. Pass the navigator checkpoint to actually film the trained policy.
+parser.add_argument("--navigator_checkpoint", type=str, default=None)
+parser.add_argument("--inner_steps", type=int, default=5, help="physics steps per navigator decision")
 parser.add_argument(
     "--thermal_viz",
     action="store_true",
@@ -219,6 +225,32 @@ runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=args.devi
 runner.load(args.checkpoint)
 policy = runner.get_inference_policy(device=env.unwrapped.device)
 print(f"[INFO] loaded checkpoint: {args.checkpoint}")
+
+# Optional high-level navigator. Reuses NavigatorEnv purely as the adapter that tells rsl-rl
+# the action space is 3 (a velocity command) rather than 12 (joint targets) -- without it the
+# runner sizes the actor from the env and rebuilds the wrong network shape.
+_nav_policy = None
+_nav_cmd = None
+if args.navigator_checkpoint:
+    from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c_rescue.nav_env import (  # noqa: E402
+        NavigatorEnv,
+    )
+
+    _nav_cmd = env.unwrapped.command_manager.get_term("base_velocity")
+    if not hasattr(_nav_cmd, "set_delta"):
+        raise SystemExit(
+            f"--navigator_checkpoint given but base_velocity is {type(_nav_cmd).__name__}. "
+            "Use the -Nav-Play- task; the plain PLAY task keeps the random velocity command."
+        )
+    _nav_shim = NavigatorEnv(env, policy, _nav_cmd, args.inner_steps)
+    _nav_cfg = load_cfg_from_registry(args.task, "navigator_cfg_entry_point")
+    _nav_cfg = handle_deprecated_rsl_rl_cfg(_nav_cfg, metadata.version("rsl-rl-lib"))
+    _nav_runner = OnPolicyRunner(_nav_shim, _nav_cfg.to_dict(), log_dir=None, device=args.device)
+    _nav_runner.load(args.navigator_checkpoint)
+    _nav_policy = _nav_runner.get_inference_policy(device=env.unwrapped.device)
+    print(f"[INFO] navigator loaded: {args.navigator_checkpoint} (delta every {args.inner_steps} steps)")
+else:
+    print("[INFO] no navigator -- command comes from the scripted seeker alone")
 
 # rsl-rl 5.x returns a single obs object here, not an (obs, extras) tuple.
 obs = env.get_observations()
@@ -413,12 +445,17 @@ def _thermal_panel():
     # Best-effort: the radiometry is decoration, the panel is the deliverable. An earlier
     # version let a shape bug inside it abort the whole render, and twelve consecutive takes
     # died for a cosmetic effect. Never again -- fall back to the flat image instead.
-    try:
-        _depth = _panel_cam.data.output.get("distance_to_image_plane")
-        temp = _apply_ir_realism(temp, _depth.torch if _depth is not None else None)
-    except Exception as exc:  # noqa: BLE001 -- deliberately broad; nothing here is fatal
-        print(f"[WARN] IR realism failed ({exc}) -- rendering flat thermal image")
-        temp = _thermal_utils.segmentation_to_temperature(seg)
+    # Only dress up the VIZ camera. When the panel is the policy's own buffer the caption says
+    # (POLICY), and adding NETD noise on top would make that caption a lie -- the actor
+    # receives the flat class-LUT image, noise and all absent. Caught by looking at a frame
+    # and reading the label against the pixels.
+    if _panel_cam is not thermal_cam:
+        try:
+            _depth = _panel_cam.data.output.get("distance_to_image_plane")
+            temp = _apply_ir_realism(temp, _depth.torch if _depth is not None else None)
+        except Exception as exc:  # noqa: BLE001 -- deliberately broad; nothing here is fatal
+            print(f"[WARN] IR realism failed ({exc}) -- rendering flat thermal image")
+            temp = _thermal_utils.segmentation_to_temperature(seg)
     norm = _thermal_utils.normalize_temperature(temp)[0]
     gray = (norm.clamp(0.0, 1.0).cpu().numpy() * 255).astype(np.uint8)
     # The LUT indexes to (..., 3), so gray must be exactly 2-D or PIL gets an array it cannot
@@ -543,6 +580,10 @@ _has_fall_term = "base_contact" in _term_mgr.active_terms
 saved = 0
 for step in range(args.steps):
     with torch.inference_mode():
+        # Refresh the navigator's delta at its own rate. The command term keeps applying the
+        # last delta on intervening steps, matching how training held it for inner_steps.
+        if _nav_policy is not None and step % args.inner_steps == 0:
+            _nav_cmd.set_delta(_nav_policy(obs))
         actions = policy(obs)
         obs, _, dones, _ = env.step(actions)
 

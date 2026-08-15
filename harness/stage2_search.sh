@@ -36,10 +36,21 @@ RUN="${RUN:-$(ls -1t logs/rsl_rl/anymal_c_rescue/ | head -1)}"
 CKPT="${CKPT:-$(ls -1t "logs/rsl_rl/anymal_c_rescue/${RUN}"/model_*.pt | head -1 | xargs -n1 basename)}"
 # Additive on resume: rsl_rl computes total_it = start_it + n.
 ITERS="${ITERS:-1200}"
+# TASK is overridable so the same script can fine-tune the walker on the *navigator* task,
+# where the velocity command comes from the thermal-driven seeker instead of a RNG. That
+# needs no code change: AnymalCRescueNavEnvCfg only ADDS a "navigator" observation group,
+# and the walker's obs_groups still names only policy+thermal, so its input width -- and
+# therefore model_4197.pt -- is unchanged.
+#
+# Why it is worth doing: the walker learned under uniform random commands resampled every
+# 10 s. The seeker feeds it smooth, sustained, purposeful motion on terrain that now contains
+# 300 kg obstacles. That is inside the trained command *range* but a different distribution
+# and a different scene, and the ~0.52 fall rate is the binding constraint on search success.
+TASK="${TASK:-Isaac-Rescue-Anymal-C-v0}"
 echo "resuming from run=${RUN} checkpoint=${CKPT} for ${ITERS} iterations"
 
 ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
-  --task Isaac-Rescue-Anymal-C-v0 \
+  --task "${TASK}" \
   --num_envs 4096 \
   --max_iterations "${ITERS}" \
   --resume \
