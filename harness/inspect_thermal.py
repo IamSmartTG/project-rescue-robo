@@ -50,7 +50,11 @@ for _ in range(args.steps):
 # --- victim geometry: does the annulus sampling actually scatter them? ---
 origins = scene.env_origins  # (N, 3)
 print("\n=== victim placement (should differ per env, radius in [1.6, 3.6]) ===")
-for name in ("victim_0", "victim_1", "victim_2"):
+# Discovered from the scene, not hardcoded. A literal ("victim_0", "victim_1", "victim_2")
+# crashed this probe the moment the roster dropped to two casualties -- and it crashed
+# *before* the segmentation dump, so a run bought purely to check the thermal camera
+# answered nothing and the GPU time was wasted.
+for name in sorted(k for k in env.unwrapped.scene.rigid_objects if k.startswith("victim")):
     pos = scene[name].data.root_pos_w.torch  # (N, 3)
     rel = pos[:, :2] - origins[:, :2]
     radius = rel.norm(dim=-1)

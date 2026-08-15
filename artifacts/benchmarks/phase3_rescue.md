@@ -343,51 +343,43 @@ Run date: 2026-08-15
 Hardware: **NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 GB** (`rescue-rtxpro`, verda)
 Stack: Isaac Sim 6.0.1.0, Isaac Lab v3.0.0-beta2 (`28a37ce`), Python 3.12.13, Ubuntu 24.04.4
 
-> ## ⚠ CORRECTION — these numbers are not trustworthy
+> ## ✅ RESOLVED — the eval numbers are valid; only the video was broken
 >
-> **The thermal camera appears to have rendered nothing during this entire session.**
+> **The thermal camera works.** Verified 2026-08-15 on a second RTX PRO 6000 with
+> `harness/inspect_thermal.py` against `Isaac-Rescue-Anymal-C-v0` -- the same task and camera
+> setup the evals use:
 >
-> Found after the fact, by inspecting `rescue_demo_v4.mp4`: the chase camera is pure black and
-> the thermal panel is uniform ambient with **no casualty blob at all**. `rescue_demo_v3.mp4` --
-> same code path, previous host -- renders the scene correctly and shows a clear warm blob. The
-> LiDAR panel is unaffected in both, which fits, since it is warp raycasting and never touches
-> the RTX renderer.
+> ```
+> segmentation buffer: shape=(4, 16, 16, 4)
+>   rgba=[0, 0, 0, 0]      pixels=324
+>   rgba=[0, 0, 0, 255]    pixels=684
+>   rgba=[255, 0, 0, 255]  pixels=16     <- victim class
+> temperature: min=0.067 max=0.883 mean=0.079
+> ```
 >
-> **Whether the eval numbers are affected depends on the cause, and the two cases differ.**
-> The render and the eval do not share a camera setup: `render_chase.py` bolts on a chase
-> camera and, with `--thermal_viz`, a third RTX camera, while `eval_rescue.py` adds **no
-> cameras at all** and runs the plain task -- one thermal camera, the same configuration the
-> working Phase 3/4 evals used.
+> `[255,0,0,255]` is `CLASS_SEG_COLOR["victim"]`, and `max=0.883` denormalises to 36.5 C,
+> exactly `CLASS_TEMPERATURE_C["victim"]`. Counts sum to 1024 = 4 envs x 16x16. The saved
+> images in `artifacts/thermal_probe/` show the casualty cluster directly. **So every number
+> in this section was measured with a working thermal sensor and stands as written.**
 >
-> * **If `--thermal_viz` is the cause**, only the video is affected. The evals never had that
->   camera, so the numbers below stand.
-> * **If the host is the cause** (RTX PRO 6000 Blackwell / Ubuntu 24.04, both first used here),
->   the evals are contaminated -- and invisibly so, because `eval_rescue.py` derives
->   `victim_found` from physics positions via `_nearest_victim`, never from the rendered image.
->   A dead camera produces plausible-looking numbers for a policy searching blind. That is a
->   different claim from "a policy failing at obstacles", and only the second is written up.
+> **What was actually broken was `rescue_demo_v4.mp4`**, and only the video. Its chase panel is
+> pure black and its thermal panel uniform ambient. The renderer and the eval do not share a
+> camera setup: `eval_rescue.py` adds no cameras and runs the plain task with one thermal
+> camera, while `render_chase.py --thermal_viz` adds a chase camera *and* a third RTX camera
+> carrying a deepcopied `IsaacRtxRendererCfg` plus a `distance_to_image_plane` AOV. The chase
+> camera's own comments already record this renderer as sensitive to exactly that. Blackwell
+> and Ubuntu 24.04 are exonerated -- the probe ran on the same hardware and rendered correctly.
 >
-> **Suspected cause, unproven, and the first case is the more likely one:**
-> `render_chase.py --thermal_viz` adds a third RTX camera with a deepcopied
-> `IsaacRtxRendererCfg` and an extra `distance_to_image_plane` AOV. The chase camera's own
-> comments record that this renderer is already sensitive to exactly that -- which cameras
-> request which AOVs -- and that per-camera renderer configs did not fix the earlier
-> black-panel bug.
+> `--thermal_viz` is now opt-in, so the default render path is the known-good one. **v4 has not
+> been re-rendered**; `rescue_demo_v3.mp4` remains the working demo video, and a disaster-scene
+> video is outstanding work costing ~25 min of GPU.
 >
-> **Why it was not diagnosed:** the instance was terminated before anyone looked at a frame,
-> and no full runtime logs were kept -- only filtered stdout. Both are process failures, not
-> hardware ones. `harness/inspect_thermal.py` exists precisely to catch this and was never run.
->
-> **To resolve** (~30 min, ~$1.15, most of it the install): run
-> `inspect_thermal.py --num_envs 4 --steps 40`. It defaults to `Isaac-Rescue-Anymal-C-v0` --
-> the *same task and camera setup as the eval* -- and prints the unique segmentation colours
-> with pixel counts plus an explicit `WARNING: thermal image is uniform` when nothing reads
-> warm. A distinct victim colour means the eval environment is healthy and **the numbers below
-> need no re-run**; a uniform image means they do.
->
-> Until that probe is run, treat the figures below as **unverified rather than wrong**. The
-> Phase 3/4 numbers above are unaffected either way -- measured on a host whose thermal camera
-> demonstrably worked, as `rescue_demo_v3.mp4` shows.
+> Two process failures are worth recording, since both cost real money. The instance was
+> terminated before anyone looked at a single frame -- the file existing was treated as the
+> artifact being correct. And `inspect_thermal.py`, which exists precisely to catch a dead
+> thermal camera and prints an explicit warning when the image is uniform, was never run after
+> the install. Running it costs three minutes and would have caught this before the evals, the
+> render, and a whole second instance.
 
 **Read this section as a measurement of an untrained policy on a new task, not as a result.**
 Everything below evaluates `model_4197.pt` — the Phase 4 checkpoint — on a scene it was never
