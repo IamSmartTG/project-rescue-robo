@@ -27,7 +27,12 @@ class AnymalCRescuePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     # env-steps/s baseline; 3000 iterations projected to 9-26 h against an Aug 16 deadline.
     # Raise it only after the measured throughput of a real run says it fits.
     max_iterations = 1500
-    save_interval = 50
+    # 25, not 50. Two massedcompute L40S instances were reclaimed out from under this project
+    # within twelve hours, one of them mid-run, so the question is not whether a run gets
+    # interrupted but how much it costs when it does. At ~7.5 s/iter a 50-iteration gap is
+    # ~6 minutes of lost work; 25 halves that. A checkpoint is 13 MB and writing one is
+    # negligible against the iteration cost, so the only thing traded away is disk.
+    save_interval = 25
     experiment_name = "anymal_c_rescue"
     obs_groups = {"actor": ["policy", "thermal"], "critic": ["policy", "thermal"]}
     actor = RslRlMLPModelCfg(

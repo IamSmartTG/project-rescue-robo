@@ -27,14 +27,21 @@ source ~/isaac/venv/bin/activate
 cd ~/isaac/IsaacLab
 
 # Both stages share experiment_name "anymal_c_rescue", so the newest run dir is stage 1's.
-RUN=$(ls -1t logs/rsl_rl/anymal_c_rescue/ | head -1)
-CKPT=$(ls -1t "logs/rsl_rl/anymal_c_rescue/${RUN}"/model_*.pt | head -1 | xargs -n1 basename)
-echo "resuming from run=${RUN} checkpoint=${CKPT}"
+#
+# That mtime heuristic is only right when stage 1 ran on this box. After rebuilding a host and
+# rsync-ing checkpoints back in, mtimes reflect the *upload* order and "newest" means nothing
+# -- so RUN and CKPT are overridable. Pass them explicitly whenever resuming a run that was
+# not trained here.
+RUN="${RUN:-$(ls -1t logs/rsl_rl/anymal_c_rescue/ | head -1)}"
+CKPT="${CKPT:-$(ls -1t "logs/rsl_rl/anymal_c_rescue/${RUN}"/model_*.pt | head -1 | xargs -n1 basename)}"
+# Additive on resume: rsl_rl computes total_it = start_it + n.
+ITERS="${ITERS:-1200}"
+echo "resuming from run=${RUN} checkpoint=${CKPT} for ${ITERS} iterations"
 
 ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
   --task Isaac-Rescue-Anymal-C-v0 \
   --num_envs 4096 \
-  --max_iterations 1200 \
+  --max_iterations "${ITERS}" \
   --resume \
   --load_run "${RUN}" \
   --checkpoint "${CKPT}" \

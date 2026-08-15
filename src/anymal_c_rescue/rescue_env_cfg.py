@@ -105,8 +105,55 @@ The principled alternative is a small CNN encoder over the image instead of flat
 into the MLP; that is the right answer if the resolution ever needs to go back up.
 """
 
-VICTIM_ASSET_NAMES: tuple[str, ...] = ("victim_0", "victim_1", "victim_2")
-"""Scene entity names of the victim props, used by the victim-search reward terms."""
+VICTIM_ASSET_NAMES: tuple[str, ...] = ("victim_0", "victim_1")
+"""Scene entity names of the victim props, used by the victim-search reward terms.
+
+Two casualties, down from three. The thermal cone is ~60 deg and ``victim_approach`` only pays
+inside it, so with three casualties tiling a 360 deg annulus a robot facing a random bearing
+usually had one already in view -- it was learning approach, not search. Two leaves a real
+chance of starting with nothing in frame and having to turn and sweep.
+
+Not one, which is where this briefly went. One casualty is the sharpest search task, but this
+retrain also introduces :data:`DEBRIS_ASSET_NAMES` -- and asking a checkpoint that has never
+seen an obstacle to simultaneously learn obstacle avoidance *and* a 3x sparser reward, inside
+one 2000-iteration budget with no second attempt, stacks two hard problems where the
+interesting one is the obstacles. Victim count is the cheaper knob, so it is the one given
+back.
+
+Expect success rate to fall against the 0.3867 measured on three casualties with no debris.
+That is the task getting harder, and it must be reported as a separate row rather than
+compared directly (artifacts/benchmarks/phase3_rescue.md).
+
+Note what is deliberately NOT changed to add difficulty:
+
+* ``found_radius`` stays 1.0 m. The camera goes blind on a 0.30 m casualty closer than 0.64 m,
+  and 1.0 m is what keeps detection firing before the robot enters that hole.
+* the annulus maximum stays inside the 4.0 m patch half-width -- see ``reset_victims``.
+
+Both look like free difficulty knobs and neither is.
+"""
+
+DEBRIS_ASSET_NAMES: tuple[str, ...] = ("debris_0", "debris_1", "debris_2", "debris_3")
+"""Scene entity names of the rubble props the robot has to get around.
+
+Why these exist at all: without them the scene has no obstacle in the ordinary sense. The
+terrain generator supplies stairs and slopes with 1-2 m of relief, which is hard ground, but
+all of it is traversable by climbing -- nothing ever *blocks* a route and forces a detour. For
+a disaster simulation that is the wrong kind of difficulty, and it also left the 288-ray LiDAR
+as the least justified sensor in the suite: the thermal camera finds casualties and the height
+scan handles terrain, so a 360 deg range sensor had no job that needed it. Debris is what gives
+it one.
+
+No new reward term goes with these, deliberately. ``base_contact`` termination already ends the
+episode when the robot collides, which is a strong penalty -- the rest of the episode, and any
+casualty it would have found. Adding an explicit collision cost on top would double-count it
+and need re-tuning against every existing weight.
+
+Four blocks per 8x8 m patch, scattered by the same annulus sampler as the casualties (one
+angular sector each, so they cannot pile up). Enough that a straight line to a casualty is
+often obstructed, sparse enough that a route always exists -- a denser field risks walling a
+casualty in, which would cap success rate for reasons that have nothing to do with the policy.
+"""
 
 
 def _victim_asset_cfg(index: int, offset: tuple[float, float, float]) -> RigidObjectCfg:
@@ -149,6 +196,41 @@ def _victim_asset_cfg(index: int, offset: tuple[float, float, float]) -> RigidOb
     )
 
 
+def _debris_asset_cfg(index: int) -> RigidObjectCfg:
+    """Build one rubble block.
+
+    Sized to be un-steppable rather than merely awkward: 0.7 m tall against a robot whose
+    trunk sits ~0.57 m up with ~0.30 m of ground clearance, so it cannot be walked over and
+    has to be walked around. Wide enough (0.8 m) that clipping a corner still registers as a
+    collision.
+
+    300 kg, deliberately far heavier than the 45 kg casualty. Debris that the robot can shove
+    aside is not an obstacle, it is a physics toy -- and a policy that learns to bulldoze
+    would look competent on video while having learned the wrong behaviour entirely.
+
+    Left semantically untagged, which is the correct thermal behaviour rather than an
+    oversight: rubble is not a heat source, so falling through to ``AMBIENT_TEMPERATURE_C``
+    is right. It still *occludes* -- geometry renders into the segmentation buffer whether or
+    not it carries a class -- so a casualty behind debris is genuinely hidden from the thermal
+    camera, which is exactly the search problem worth posing.
+    """
+    return RigidObjectCfg(
+        prim_path=f"{{ENV_REGEX_NS}}/Debris_{index}",
+        # Placed by the reset_debris event, not by this pose -- see the VICTIM_OFFSETS
+        # docstring for why anything under ENV_REGEX_NS needs repositioning off env_origins.
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 2.0)),
+        spawn=sim_utils.MeshCuboidCfg(
+            size=(0.8, 0.8, 0.7),
+            rigid_props=sim_utils.RigidBodyBaseCfg(),
+            collision_props=CollisionBaseCfg(collision_enabled=True),
+            mass_props=sim_utils.MassPropertiesCfg(mass=300.0),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.38, 0.36, 0.34), roughness=1.0
+            ),
+        ),
+    )
+
+
 ##
 # Scene
 ##
@@ -159,9 +241,18 @@ class RescueSceneCfg(MySceneCfg):
     """Rough-terrain scene plus rescue sensors and victim props."""
 
     # -- victim props (semantically tagged rigid bodies)
+    # Two props, matching VICTIM_ASSET_NAMES. The props must not outnumber the names: an
+    # unlisted prop would still be raycast by the LiDAR and still render warm to the thermal
+    # camera, so the robot would see a casualty that no reward term recognises and no eval
+    # counts as found.
     victim_0: RigidObjectCfg = _victim_asset_cfg(0, VICTIM_OFFSETS[0])
     victim_1: RigidObjectCfg = _victim_asset_cfg(1, VICTIM_OFFSETS[1])
-    victim_2: RigidObjectCfg = _victim_asset_cfg(2, VICTIM_OFFSETS[2])
+
+    # -- rubble props (untagged, so thermally cold; see DEBRIS_ASSET_NAMES)
+    debris_0: RigidObjectCfg = _debris_asset_cfg(0)
+    debris_1: RigidObjectCfg = _debris_asset_cfg(1)
+    debris_2: RigidObjectCfg = _debris_asset_cfg(2)
+    debris_3: RigidObjectCfg = _debris_asset_cfg(3)
 
     # -- ray-cast LiDAR on the trunk
     # MultiMeshRayCaster (not RayCaster) because the plain RayCaster hard-errors on more
@@ -195,6 +286,13 @@ class RescueSceneCfg(MySceneCfg):
             # holds because the victims are RigidObjectCfg.
             MultiMeshRayCasterCfg.RaycastTargetCfg(
                 prim_expr="/World/envs/env_.*/Victim_.*", track_mesh_transforms=True
+            ),
+            # Debris, for the same reason and with the same track_mesh_transforms caveat.
+            # Without this entry the rubble is invisible to the LiDAR: warp raycasts only the
+            # meshes named here, so the robot would collide with obstacles it has no sensor
+            # channel for, and "learn to avoid debris" would be unlearnable rather than hard.
+            MultiMeshRayCasterCfg.RaycastTargetCfg(
+                prim_expr="/World/envs/env_.*/Debris_.*", track_mesh_transforms=True
             ),
         ],
         debug_vis=False,
@@ -332,8 +430,43 @@ class RescueEventsCfg(EventsCfg):
         mode="reset",
         params={
             "victim_names": VICTIM_ASSET_NAMES,
-            # max radius stays inside the 8x8 m patch half-width of 4.0 m
-            "radius_range": (1.6, 3.6),
+            # (2.5, 3.8), widened from (1.6, 3.6). Raising the *minimum* is the part that
+            # matters: a casualty spawned 1.6 m away is inside the found radius after two
+            # steps, so those episodes taught approach rather than search. Mean spawn
+            # distance goes ~2.7 -> ~3.2 m and the trivial cases are gone.
+            #
+            # The maximum barely moves, and cannot. Patches are 8x8 m, so each robot owns a
+            # 4.0 m half-width; a casualty beyond that lands in a neighbour's patch, where
+            # the neighbour's thermal camera and LiDAR register a heat source it is never
+            # rewarded for reaching. That is the cross-env contamination the camera's 8.0 m
+            # far clip was introduced to stop, and widening the annulus would reintroduce it
+            # through the other door. 3.8 leaves 0.2 m of margin.
+            #
+            # The demo render is not bound by this -- it runs one robot with no neighbours --
+            # and passes a much wider annulus via render_chase.py --victim_radius.
+            "radius_range": (2.5, 3.8),
+            "drop_height": 2.0,
+        },
+    )
+
+    # Scatter the rubble too, reusing the casualty sampler rather than writing a second one.
+    # It already does what is needed: one angular sector per prop so they cannot pile up, and
+    # sqrt-weighted radii so they spread over area instead of hugging the origin.
+    #
+    # The radius band (1.2, 3.2) deliberately overlaps and undercuts the casualty band
+    # (2.5, 3.8), so debris tends to sit *between* the robot at the origin and the casualty
+    # it is walking toward. Placing rubble further out than the casualties would make it
+    # scenery; placing it in the path is what forces a detour.
+    #
+    # Declared after reset_victims so the two draws are independent -- neither sampler knows
+    # about the other, so a block can land near a casualty. That is realistic (rubble does not
+    # politely avoid people) and the sector split keeps it from happening often.
+    reset_debris = EventTerm(
+        func=rescue_mdp.reset_victims_annulus,
+        mode="reset",
+        params={
+            "victim_names": DEBRIS_ASSET_NAMES,
+            "radius_range": (1.2, 3.2),
             "drop_height": 2.0,
         },
     )
@@ -365,7 +498,13 @@ class RescueRewardsCfg(RewardsCfg):
         weight=0.5,
         params={
             "victim_names": VICTIM_ASSET_NAMES,
-            "detect_range": LIDAR_MAX_RANGE,
+            # 8.0, matching the thermal camera's far clip -- NOT LIDAR_MAX_RANGE (10.0).
+            # The gate exists to stop the policy being paid for closing on a casualty it
+            # cannot sense, but a 10 m range gate against an 8 m camera left a 2 m band where
+            # exactly that happened. Flagged in the Phase 3/4 benchmark and deliberately left
+            # alone then, so the shipped eval measured the shipped policy; fixed now, with
+            # that eval as the before-number.
+            "detect_range": 8.0,
             # Gate on the thermal camera's cone (~60 deg horizontal at focal_length=18 with
             # the default 20.955 mm aperture, so 30 deg half-angle), NOT the 360-degree
             # LiDAR. With a range-only gate the gate gated nothing: the LiDAR reaches 10 m
