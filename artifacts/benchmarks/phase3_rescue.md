@@ -353,31 +353,41 @@ Stack: Isaac Sim 6.0.1.0, Isaac Lab v3.0.0-beta2 (`28a37ce`), Python 3.12.13, Ub
 > LiDAR panel is unaffected in both, which fits, since it is warp raycasting and never touches
 > the RTX renderer.
 >
-> **Why this contaminates the eval and not just the video:** `eval_rescue.py` derives
-> `victim_found` from physics positions via `_nearest_victim`, never from the rendered image. A
-> dead thermal camera is therefore completely invisible to it -- the eval reports plausible
-> numbers while the policy receives a blank, constant thermal observation. So the success, SPL
-> and fall figures below may describe *a policy searching blind*, not a policy failing at
-> obstacles. Those are different claims and only the second one is written up below.
+> **Whether the eval numbers are affected depends on the cause, and the two cases differ.**
+> The render and the eval do not share a camera setup: `render_chase.py` bolts on a chase
+> camera and, with `--thermal_viz`, a third RTX camera, while `eval_rescue.py` adds **no
+> cameras at all** and runs the plain task -- one thermal camera, the same configuration the
+> working Phase 3/4 evals used.
 >
-> **Suspected cause, unproven:** `render_chase.py --thermal_viz` adds a third RTX camera with a
-> deepcopied `IsaacRtxRendererCfg` and an extra `distance_to_image_plane` AOV. The chase
-> camera's own comments record that this renderer is already sensitive to exactly that -- which
-> cameras request which AOVs -- and that per-camera renderer configs did not fix the earlier
-> black-panel bug. The confounder is that this was also the first run on RTX PRO 6000 Blackwell
-> and Ubuntu 24.04.
+> * **If `--thermal_viz` is the cause**, only the video is affected. The evals never had that
+>   camera, so the numbers below stand.
+> * **If the host is the cause** (RTX PRO 6000 Blackwell / Ubuntu 24.04, both first used here),
+>   the evals are contaminated -- and invisibly so, because `eval_rescue.py` derives
+>   `victim_found` from physics positions via `_nearest_victim`, never from the rendered image.
+>   A dead camera produces plausible-looking numbers for a policy searching blind. That is a
+>   different claim from "a policy failing at obstacles", and only the second is written up.
+>
+> **Suspected cause, unproven, and the first case is the more likely one:**
+> `render_chase.py --thermal_viz` adds a third RTX camera with a deepcopied
+> `IsaacRtxRendererCfg` and an extra `distance_to_image_plane` AOV. The chase camera's own
+> comments record that this renderer is already sensitive to exactly that -- which cameras
+> request which AOVs -- and that per-camera renderer configs did not fix the earlier
+> black-panel bug.
 >
 > **Why it was not diagnosed:** the instance was terminated before anyone looked at a frame,
 > and no full runtime logs were kept -- only filtered stdout. Both are process failures, not
-> hardware ones.
+> hardware ones. `harness/inspect_thermal.py` exists precisely to catch this and was never run.
 >
-> **To resolve** (~15 min, ~$1): bring up a box, run `render_chase.py` *without* `--thermal_viz`
-> (now the default) and confirm the chase panel is not black. If it renders, `thermal_viz` is
-> the culprit and the evals must be re-run to produce valid Phase 5 numbers. If it is still
-> black, the cause is the host and the same re-run is needed on different hardware.
+> **To resolve** (~30 min, ~$1.15, most of it the install): run
+> `inspect_thermal.py --num_envs 4 --steps 40`. It defaults to `Isaac-Rescue-Anymal-C-v0` --
+> the *same task and camera setup as the eval* -- and prints the unique segmentation colours
+> with pixel counts plus an explicit `WARNING: thermal image is uniform` when nothing reads
+> warm. A distinct victim colour means the eval environment is healthy and **the numbers below
+> need no re-run**; a uniform image means they do.
 >
-> Until then, treat every figure in this section as **unverified**. The Phase 3/4 numbers above
-> are unaffected -- they were measured on a host whose thermal camera demonstrably worked.
+> Until that probe is run, treat the figures below as **unverified rather than wrong**. The
+> Phase 3/4 numbers above are unaffected either way -- measured on a host whose thermal camera
+> demonstrably worked, as `rescue_demo_v3.mp4` shows.
 
 **Read this section as a measurement of an untrained policy on a new task, not as a result.**
 Everything below evaluates `model_4197.pt` — the Phase 4 checkpoint — on a scene it was never
