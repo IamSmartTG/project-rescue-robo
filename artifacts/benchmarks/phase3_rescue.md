@@ -573,3 +573,115 @@ previous run here, and worth knowing works.
 They have no RT cores. The thermal camera is an RTX render pass and rendering dominates
 iteration cost (7.5 s/iter with the camera against 3.07 s/iter without), so a compute-optimised
 card is a downgrade. L40S, RTX 6000 Ada and RTX PRO 6000 are the right family.
+
+---
+
+# The search task is not a search task
+
+Found 2026-08-15, prompted by a simple question about the demo video: *why does the robot
+sometimes walk backwards?*
+
+## What the config actually does
+
+`rescue_env_cfg.py` overrides the scene, observations, events and rewards. It does **not**
+override `commands`, so `AnymalCRoughEnvCfg`'s command manager is inherited untouched. From
+the resolved dump in `artifacts/checkpoints/anymal_c_rescue/2026-08-13_19-20-52/params/env.yaml`:
+
+```yaml
+base_velocity:
+  class_type: UniformVelocityCommand
+  resampling_time_range: (10.0, 10.0)
+  heading_command: true
+  rel_heading_envs: 1.0
+  ranges:
+    lin_vel_x: (-1.0, 1.0)      # includes reverse
+    lin_vel_y: (-1.0, 1.0)
+    ang_vel_z: (-1.0, 1.0)
+    heading:   (-3.14159, 3.14159)
+```
+
+**The robot is handed a uniformly random direction and heading, resampled every 10 seconds.**
+Episodes run ~20 s, so roughly two random commands per episode. The backwards walking in the
+demo is not a glitch — `lin_vel_x` is sampled from a range that includes −1.0 m/s, and the
+policy is doing exactly as instructed.
+
+## Why this undermines the search claim
+
+The three victim rewards are shaping terms layered on top of obedience to that random command,
+and they are in direct competition with `track_lin_vel_xy_exp`, which pays the robot for
+matching it. When the command says reverse and a casualty is ahead, the policy must give up one
+or the other, and the locomotion weights dominate.
+
+So the sensors inform **gait**, not **goals**. The thermal image and LiDAR ranges are in the
+observation vector, but no part of the architecture lets the policy act on them to *choose a
+destination*. The comment in `RescueRewardsCfg` claiming `victim_approach` is "what makes the
+LiDAR and thermal camera load-bearing" is not supported: the reward can nudge the gait, but it
+cannot steer a robot whose heading target is drawn from a uniform distribution.
+
+**Every success rate in this document therefore measures how often a randomly-commanded walk
+passes within `found_radius` of a casualty**, plus whatever small bias the shaping rewards add.
+That is not zero — the numbers are not noise — but it is not search.
+
+### The SPL number was already saying this
+
+`spl_straight_line_proxy = 0.0789`, from 5.11 m walked to reach a casualty 1.97 m away: paths
+roughly **twelve times longer than optimal**. That is the signature of a random walk that
+happens to intersect a target, not of an agent that detects and approaches one. The metric
+caught the problem on the day it was added; it was initially written up as evidence about
+obstacles instead. Worth remembering that SPL earned its place here by contradicting the story
+everything else was telling.
+
+## What an architecture that actually searches looks like
+
+The missing piece is a component that converts sensor readings into a **goal**. Four ways to
+add one, cheapest first.
+
+### 1. Scripted perception → velocity command (no retraining)
+
+Keep the trained locomotion policy exactly as it is. Replace `UniformVelocityCommand` with a
+command term that reads the thermal image, finds the warm blob's bearing, and emits a velocity
+command pointing at it — falling back to a scanning rotation when nothing is in frame.
+
+This works *because* the existing policy is a competent velocity tracker: `Metrics/success_rate
+= 0.8433` for command following. Give it a command that points at the casualty and it will walk
+there. **No training, no new checkpoint, implementable in the harness alone**, and directly
+testable with the existing `eval_rescue.py`.
+
+It is a hand-written controller on top of a learned walker, not learned search — which is worth
+stating plainly, but it is also what many fielded systems do, including the ANYmal entries in
+the DARPA SubT Challenge, where classical planning drove a learned or model-based locomotion
+layer.
+
+### 2. Hierarchical RL — the standard answer
+
+A high-level policy consumes perception and *emits* the velocity command at low rate (5–10 Hz);
+the existing locomotion policy tracks it at 50 Hz. The trained walker is reused as the
+low-level controller rather than discarded.
+
+This is the established decomposition for vision-driven legged navigation — see Fu et al.,
+*Coupling Vision and Proprioception for Navigation of Legged Robots* (CVPR 2022), and the
+perceptive-locomotion line of work from Miki et al., *Learning robust perceptive locomotion for
+quadrupedal robots in the wild* (Science Robotics, 2022). It is more work than option 1 and it
+is the honest "learned search" answer.
+
+### 3. Goal-conditioned commands
+
+Keep one policy, but replace the random velocity command with a goal — a relative casualty
+bearing and range derived from the sensors — and condition the policy on that. Simpler than a
+two-level system, but it changes the observation layout, so existing checkpoints will not load
+and stage 1 must be retrained.
+
+### 4. End-to-end, command removed
+
+Delete the velocity command entirely and let victim rewards plus locomotion regularisers drive
+joint targets directly. Purest formulation, worst sample efficiency, and it discards the
+terrain curriculum's velocity-tracking signal, which is what got this robot to tier 3.7 in the
+first place. Not recommended.
+
+## Recommended next step
+
+**Option 1.** It costs no GPU training, reuses everything already built, and turns the existing
+eval harness into a direct before/after measurement: same policy, same scene, same metrics,
+with the only change being where the velocity command comes from. If SPL moves from 0.08 toward
+0.5+ and success rate climbs, that is a clean demonstration that the sensor suite is doing
+work — which is the claim this project has been trying to support all along.
