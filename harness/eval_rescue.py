@@ -9,6 +9,9 @@ happened.
 Reported:
     success rate     -- fraction of episodes where the robot got within found_radius of a
                         casualty at least once before the episode ended
+    SPL              -- success weighted by path length, the standard target-finding metric
+                        (see :mod:`spl`). Success rate alone cannot separate "searched and
+                        found" from "wandered into one"; this can.
     time to find     -- seconds to first contact, over successful episodes only
     fall rate        -- fraction of episodes ended by base contact rather than time-out
     terrain level    -- mean difficulty tier the episodes ran on
@@ -49,10 +52,16 @@ import gymnasium as gym  # noqa: E402
 import torch  # noqa: E402
 
 import isaaclab_tasks  # noqa: F401, E402
+from isaaclab.managers import SceneEntityCfg  # noqa: E402
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry  # noqa: E402
 from rsl_rl.runners import OnPolicyRunner  # noqa: E402
+
+# Sibling module in harness/, resolved through sys.path[0]. Pure Python and torch-free on
+# purpose -- the SPL reduction runs once over a few hundred finished episodes, so it costs
+# nothing to keep it testable on a laptop with no Isaac Sim and no torch.
+import spl as spl_utils  # noqa: E402
 
 env_cfg = parse_env_cfg(args.task, device=args.device, num_envs=args.num_envs)
 
@@ -100,7 +109,33 @@ n = args.num_envs
 # Episode_Reward/victim_found can never describe different events.
 found_term = env.unwrapped.reward_manager.get_term_cfg("victim_found")
 
+# Read the search geometry off the reward term rather than restating it, so SPL can never
+# describe a different task than success_rate does. Changing found_radius or the victim roster
+# in rescue_env_cfg.py then flows through here with no edit.
+victim_names = found_term.params["victim_names"]
+found_radius = found_term.params["found_radius"]
+print(f"[INFO] {len(victim_names)} victim asset(s): {victim_names}, found_radius={found_radius} m")
+
+robot = env.unwrapped.scene["robot"]
+
+# Rubble props, discovered from the scene rather than imported from the config, so this keeps
+# working on tasks that have none (the pre-debris checkpoints, the NoCam variant) instead of
+# failing on a missing name.
+debris_names = tuple(
+    sorted(k for k in getattr(env.unwrapped.scene, "rigid_objects", {}) if k.startswith("debris"))
+)
+# Termination within this distance of a rubble centre is counted as "hit the rubble".
+# The block is 0.8 m across and the robot is ~1.0 m long, so contact happens with centres
+# roughly 0.9 m apart; 1.5 m leaves margin for the trunk's own length and for the block
+# having been nudged. Too tight and real collisions get filed as terrain falls.
+debris_near_m = 1.5
+if debris_names:
+    print(f"[INFO] {len(debris_names)} debris prop(s): {debris_names}")
+else:
+    print("[INFO] no debris props in this task -- collision split not reported")
+
 found = torch.zeros(n, dtype=torch.bool, device=dev)
+fell_near_debris = torch.zeros(n, dtype=torch.bool, device=dev)
 find_step = torch.full((n,), -1, dtype=torch.long, device=dev)
 done_once = torch.zeros(n, dtype=torch.bool, device=dev)  # freeze stats after first episode
 ep_len = torch.zeros(n, dtype=torch.long, device=dev)
@@ -117,6 +152,21 @@ horizon = int(env.unwrapped.max_episode_length) + 10
 step_dt = env.unwrapped.step_dt
 
 obs = env.get_observations()
+
+# SPL needs the shortest path that would have counted as success, measured at spawn, and the
+# path actually walked to first contact. Reuse the reward code's own distance helper rather
+# than recomputing "distance to nearest victim" a second way -- two implementations of that
+# would eventually disagree.
+from isaaclab_tasks.manager_based.locomotion.velocity.config.anymal_c_rescue.rescue_mdp import (  # noqa: E402
+    _nearest_victim,
+)
+
+# Captured before the first step(), so these are spawn positions.
+spawn_dist, _ = _nearest_victim(env.unwrapped, victim_names, SceneEntityCfg("robot"))
+spawn_dist = spawn_dist.clone()
+path_len = torch.zeros(n, device=dev)
+prev_pos = robot.data.root_pos_w.torch[:, :2].clone()
+
 for step in range(horizon):
     with torch.inference_mode():
         actions = policy(obs)
@@ -125,6 +175,20 @@ for step in range(horizon):
     live = ~done_once
     if not live.any():
         break
+
+    # Path walked, for SPL. Three gates, each load-bearing:
+    #   live      -- stop counting once this env's first episode is over
+    #   ~found    -- SPL measures the path *to* the goal, not wandering afterwards
+    #   ~dones    -- ManagerBasedRLEnv resets terminated envs *inside* step(), so on the
+    #                terminating step root_pos_w has already teleported to the next spawn.
+    #                Without this the delta adds metres of fictional path. It only ever
+    #                mattered for failed episodes (a found env is already excluded), and
+    #                those contribute 0 to SPL -- but they do contribute to
+    #                mean_path_length_m, which would otherwise be nonsense.
+    cur_pos = robot.data.root_pos_w.torch[:, :2]
+    moving = live & ~found & ~dones.bool()
+    path_len += torch.where(moving, torch.norm(cur_pos - prev_pos, dim=-1), torch.zeros_like(path_len))
+    prev_pos = cur_pos.clone()
 
     hit = found_term.func(env.unwrapped, **found_term.params) > 0.0
     first = hit & live & ~found
@@ -135,7 +199,24 @@ for step in range(horizon):
     # Latch the ending condition for envs finishing their first episode on this step.
     ending = dones.bool() & live
     if has_fall_term and ending.any():
-        fell |= ending & term.get_term("base_contact").bool()
+        this_fall = ending & term.get_term("base_contact").bool()
+        fell |= this_fall
+        # Split falls into "hit the rubble" and "lost it on the terrain".
+        #
+        # Without this the headline fall rate is uninterpretable now that debris exists:
+        # base_contact fires on trunk contact with anything, so a run that goes 0.39 -> 0.60
+        # could mean the obstacles are real and the robot is bumping them (expected, and the
+        # thing being measured) or that the walker has degraded (a regression). Those demand
+        # opposite responses and the old metric cannot tell them apart.
+        #
+        # Proximity heuristic, not ground truth: ContactSensor reports net force on the
+        # trunk, not which body applied it, so identifying the collision partner properly
+        # would mean a per-pair contact filter. Terminating within debris_near_m of a block
+        # is a good enough proxy -- and it is a proxy, so the field is named for the
+        # measurement rather than for the conclusion.
+        if debris_names:
+            d_debris, _ = _nearest_victim(env.unwrapped, debris_names, SceneEntityCfg("robot"))
+            fell_near_debris |= this_fall & (d_debris < debris_near_m)
 
     done_once |= dones.bool()
 
@@ -143,15 +224,35 @@ print(f"[INFO] {int(done_once.sum())}/{n} episodes terminated within {horizon} s
 
 succ = found.float().mean().item()
 ttf = find_step[found]
+
+# SPL. The reduction is a few hundred scalars, so it drops to plain Python lists rather than
+# growing a torch implementation that the self-check in spl.py could not exercise.
+shortest = [spl_utils.shortest_path_length(d, found_radius) for d in spawn_dist.tolist()]
+spl_score = spl_utils.spl(found.tolist(), path_len.tolist(), shortest)
+
 result = {
     "checkpoint": args.checkpoint,
     "task": args.task,
     "episodes": n,
+    "victims": len(victim_names),
     "success_rate": round(succ, 4),
+    # Straight-line, not geodesic -- see the module docstring in spl.py. Named so that the
+    # approximation travels with the number instead of being lost on the way into a table.
+    "spl_straight_line_proxy": round(spl_score, 4),
+    "mean_path_length_m": round(path_len.mean().item(), 2),
+    "mean_shortest_path_m": round(sum(shortest) / len(shortest), 2) if shortest else None,
     "mean_time_to_find_s": round((ttf.float().mean().item() * step_dt), 3) if ttf.numel() else None,
     "mean_episode_length_steps": round(ep_len.float().mean().item(), 1),
     "mean_episode_length_s": round(ep_len.float().mean().item() * step_dt, 2),
     "fall_rate": round(fell.float().mean().item(), 4),
+    # Split of the line above, not an addition to it. Named "_near_debris" rather than
+    # "_by_collision" because it is a proximity proxy: the contact sensor reports net force
+    # on the trunk, not what applied it. Reported only when the task has rubble at all.
+    "fall_rate_near_debris": round(fell_near_debris.float().mean().item(), 4) if debris_names else None,
+    "fall_rate_terrain_only": round((fell & ~fell_near_debris).float().mean().item(), 4)
+    if debris_names
+    else None,
+    "debris_props": len(debris_names),
     "mean_terrain_level": round(env.unwrapped.scene.terrain.terrain_levels.float().mean().item(), 3)
     if getattr(env.unwrapped.scene, "terrain", None) is not None
     and getattr(env.unwrapped.scene.terrain, "terrain_levels", None) is not None
