@@ -44,6 +44,14 @@ parser.add_argument(
     default=None,
     help="override the victim spawn annulus [m], e.g. --victim_radius 5.0 6.5",
 )
+# Opt-in, not default. The only render made with it produced a black chase panel and a blank
+# thermal panel -- see the long note at the thermal_viz camera. Verify a frame before trusting
+# a video made with this on.
+parser.add_argument(
+    "--thermal_viz",
+    action="store_true",
+    help="add a 64x64 viz-only thermal camera for the panel (UNVERIFIED -- see notes)",
+)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.enable_cameras = True  # the RTX renderer must be up for any camera to produce pixels
@@ -153,7 +161,24 @@ if _thermal_cfg is not None and "rgb" not in _thermal_cfg.data_types:
 # sampled finer. Deliberately semantic_segmentation only: this camera is never asked for an
 # rgb AOV, since the chase camera already forces one.
 _THERMAL_VIZ_RESOLUTION = (64, 64)
-if _thermal_cfg is not None:
+# OFF BY DEFAULT, because the one render made with it came out unusable.
+#
+# rescue_demo_v4.mp4: chase camera pure black and the thermal panel uniform ambient with no
+# casualty blob, while rescue_demo_v3.mp4 -- same code path, previous host, no thermal_viz --
+# rendered correctly. The LiDAR panel was unaffected, which fits: it is warp raycasting and
+# never touches the RTX renderer.
+#
+# Unproven but most likely: this adds a *third* RTX camera carrying a deepcopied
+# IsaacRtxRendererCfg and an extra distance_to_image_plane AOV, and the comment at the chase
+# camera above records that this renderer is already sensitive to exactly that -- which
+# cameras ask for which AOVs. The confounder is that the same run was also the first on
+# Blackwell and Ubuntu 24.04, and the instance was terminated before either could be ruled
+# out.
+#
+# Until someone reproduces it, the default path is the one known to produce a watchable
+# video. Pass --thermal_viz to opt in, and check the chase panel is not black before
+# trusting the output.
+if _thermal_cfg is not None and args.thermal_viz:
     # deepcopy, not a shared reference, for offset/spawn/renderer_cfg. The chase camera above
     # is commented with the lesson: two cameras sharing one IsaacRtxRendererCfg is exactly how
     # the black-panel bug behaved, and "give each camera its own renderer config" was the

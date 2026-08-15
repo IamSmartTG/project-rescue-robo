@@ -343,6 +343,42 @@ Run date: 2026-08-15
 Hardware: **NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 GB** (`rescue-rtxpro`, verda)
 Stack: Isaac Sim 6.0.1.0, Isaac Lab v3.0.0-beta2 (`28a37ce`), Python 3.12.13, Ubuntu 24.04.4
 
+> ## ⚠ CORRECTION — these numbers are not trustworthy
+>
+> **The thermal camera appears to have rendered nothing during this entire session.**
+>
+> Found after the fact, by inspecting `rescue_demo_v4.mp4`: the chase camera is pure black and
+> the thermal panel is uniform ambient with **no casualty blob at all**. `rescue_demo_v3.mp4` --
+> same code path, previous host -- renders the scene correctly and shows a clear warm blob. The
+> LiDAR panel is unaffected in both, which fits, since it is warp raycasting and never touches
+> the RTX renderer.
+>
+> **Why this contaminates the eval and not just the video:** `eval_rescue.py` derives
+> `victim_found` from physics positions via `_nearest_victim`, never from the rendered image. A
+> dead thermal camera is therefore completely invisible to it -- the eval reports plausible
+> numbers while the policy receives a blank, constant thermal observation. So the success, SPL
+> and fall figures below may describe *a policy searching blind*, not a policy failing at
+> obstacles. Those are different claims and only the second one is written up below.
+>
+> **Suspected cause, unproven:** `render_chase.py --thermal_viz` adds a third RTX camera with a
+> deepcopied `IsaacRtxRendererCfg` and an extra `distance_to_image_plane` AOV. The chase
+> camera's own comments record that this renderer is already sensitive to exactly that -- which
+> cameras request which AOVs -- and that per-camera renderer configs did not fix the earlier
+> black-panel bug. The confounder is that this was also the first run on RTX PRO 6000 Blackwell
+> and Ubuntu 24.04.
+>
+> **Why it was not diagnosed:** the instance was terminated before anyone looked at a frame,
+> and no full runtime logs were kept -- only filtered stdout. Both are process failures, not
+> hardware ones.
+>
+> **To resolve** (~15 min, ~$1): bring up a box, run `render_chase.py` *without* `--thermal_viz`
+> (now the default) and confirm the chase panel is not black. If it renders, `thermal_viz` is
+> the culprit and the evals must be re-run to produce valid Phase 5 numbers. If it is still
+> black, the cause is the host and the same re-run is needed on different hardware.
+>
+> Until then, treat every figure in this section as **unverified**. The Phase 3/4 numbers above
+> are unaffected -- they were measured on a host whose thermal camera demonstrably worked.
+
 **Read this section as a measurement of an untrained policy on a new task, not as a result.**
 Everything below evaluates `model_4197.pt` — the Phase 4 checkpoint — on a scene it was never
 trained for. The retraining that would make these numbers meaningful was scoped, costed and
