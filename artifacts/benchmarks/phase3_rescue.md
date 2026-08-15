@@ -334,3 +334,204 @@ One renderer gotcha, since it cost real time: that chase camera renders **pure b
 task that also carries the thermal camera, while working fine in the camera-free task. The RTX
 renderer only produces a colour AOV when some camera asks for one, and the thermal camera asks
 only for `semantic_segmentation`. Adding `rgb` to the thermal camera's `data_types` fixes it.
+
+---
+
+# Phase 5 — a disaster scene, and a standard metric
+
+Run date: 2026-08-15
+Hardware: **NVIDIA RTX PRO 6000 Blackwell Server Edition, 96 GB** (`rescue-rtxpro`, verda)
+Stack: Isaac Sim 6.0.1.0, Isaac Lab v3.0.0-beta2 (`28a37ce`), Python 3.12.13, Ubuntu 24.04.4
+
+**Read this section as a measurement of an untrained policy on a new task, not as a result.**
+Everything below evaluates `model_4197.pt` — the Phase 4 checkpoint — on a scene it was never
+trained for. The retraining that would make these numbers meaningful was scoped, costed and
+then deliberately deferred (see "What was not done").
+
+## What changed, and why
+
+Four changes to the task, one to the metrics, one to the renderer.
+
+### The scene is now a disaster site
+
+`ROUGH_TERRAINS_CFG` supplies stairs and slopes with 1–2 m of relief, which is hard ground —
+but all of it is traversable by climbing. Nothing ever *blocked* a route. For a search-and-
+rescue simulation that is the wrong kind of difficulty, and it left the 288-ray LiDAR as the
+least justified sensor in the suite: the thermal camera locates casualties and the height scan
+handles terrain, so a 360° range sensor had no job that required it.
+
+`DEBRIS_ASSET_NAMES` adds four rubble blocks per 8×8 m patch — 0.8 × 0.8 × 0.7 m, 300 kg,
+scattered by the same annulus sampler as the casualties over a (1.2, 3.2) m band that
+deliberately undercuts the casualty band so rubble sits *between* the robot and its target.
+
+Three design choices worth recording:
+
+- **0.7 m tall.** The trunk sits ~0.57 m up with ~0.30 m clearance, so a block cannot be
+  stepped over and has to be routed around.
+- **300 kg, not the casualty's 45.** Debris the robot can shove is a physics toy, and a policy
+  that learns to bulldoze looks competent on video while having learned the wrong behaviour.
+- **No new reward term.** `base_contact` termination already ends the episode on collision,
+  costing the robot the remaining ~15 s and any casualty in them. An explicit collision
+  penalty would double-count it and force retuning every existing weight.
+
+The debris is left semantically untagged, which is correct rather than lazy: rubble is not a
+heat source, so it falls through to `AMBIENT_TEMPERATURE_C`. It still *occludes*, because
+geometry renders into the segmentation buffer whether or not it carries a class — so a
+casualty behind debris is genuinely hidden from the thermal camera.
+
+The one line that makes any of this learnable is in the LiDAR config: `Debris_.*` had to be
+added to `mesh_prim_paths`. Warp only raycasts the meshes named there, so without it the robot
+would collide with obstacles it has no sensor channel for.
+
+### Search difficulty
+
+Casualties 3 → 2, and the spawn annulus (1.6, 3.6) → (2.5, 3.8) m. Raising the *minimum* is the
+part that matters: a casualty at 1.6 m was inside `found_radius` within two steps, so those
+episodes taught approach rather than search.
+
+The maximum barely moved and cannot. Patches are 8×8 m, so each robot owns a 4.0 m half-width;
+beyond that, casualties land in a neighbour's patch where that neighbour's sensors register a
+heat source it is never rewarded for reaching — the same cross-env contamination the camera's
+8.0 m far clip exists to prevent.
+
+`victim_approach.detect_range` 10.0 → 8.0 m, closing the clairvoyance band flagged in Phase 4.
+
+### SPL
+
+Success rate cannot distinguish "searched and found" from "wandered into one". `harness/spl.py`
+adds **SPL** (Anderson et al. 2018, arXiv:1807.06757), the metric the Habitat / HM3D / RoboTHOR
+ObjectNav challenges report.
+
+It is recorded as **`spl_straight_line_proxy`**, never as bare SPL. True SPL uses the geodesic
+shortest path; this uses crow-flies distance minus `found_radius`. On open terrain that is
+close, but the approximation can only ever *flatter* the agent, since a geodesic path is ≥ the
+straight line and a larger optimum raises the ratio. The name carries the caveat so it cannot
+be lost on the way into a table.
+
+### A thermal panel that looks like a sensor
+
+The policy's thermal image stays 16×16 — 64×64 was measured and it collapsed training (see
+`THERMAL_RESOLUTION`). But nothing requires the *video* to display the actor's buffer, so
+`render_chase.py` bolts on a second 64×64 `thermal_viz` camera, same mount and lens, used only
+for the panel. No observation term names it, so the checkpoint's input width is untouched.
+
+On the viz path only, `_apply_ir_realism` adds Beer-Lambert attenuation over a 12 m path
+length, 0.35 °C of NETD noise and optical blur — so a casualty at 6.5 m reads visibly dimmer
+than one at 2 m, as it would through real IR. The panel is captioned `THERMAL 64x64 (VIZ)`
+so the video cannot be read as a claim about what the policy sees.
+
+## Results — `model_4197.pt` on the disaster scene, 256 episodes
+
+`artifacts/benchmarks/eval_rescue_debris_baseline.json`
+
+| Metric | Phase 4 scene | **Disaster scene** |
+|---|---|---|
+| Casualties | 3 | 2 |
+| Debris | none | 4 blocks |
+| Spawn annulus | 1.6–3.6 m | 2.5–3.8 m |
+| **Success rate** | 0.3867 | **0.1250** |
+| **SPL (straight-line proxy)** | not measured | **0.0789** |
+| Mean path walked | not measured | 5.11 m |
+| Mean shortest path | not measured | 1.97 m |
+| **Fall rate** | 0.3906 | **0.7188** |
+|  ├ near debris (≤1.5 m) | — | 0.2695 |
+|  └ terrain only | 0.3906 | 0.4492 |
+| Mean episode length | 780.6 steps | 465.1 |
+| Mean terrain level | 3.434 | 2.332 |
+
+Walking 5.11 m to reach something 1.97 m away, succeeding one episode in eight. That is a
+policy with no representation of the obstacles it is failing on, quantified.
+
+### Two numbers that must not be read at face value
+
+**`fall_rate_near_debris` = 0.2695 is a floor, not an estimate.** The contact sensor reports
+net force on the trunk, not what applied it, so attribution here is a proximity heuristic:
+terminating within 1.5 m of a block counts as a collision. A robot that clips a corner,
+staggers and goes down three metres later is filed as a terrain fall. Proper attribution needs
+a per-pair contact filter.
+
+**`fall_rate_terrain_only` rose 0.3906 → 0.4492 while the terrain got *easier*, 3.434 → 2.332.**
+Falling more on gentler ground is not a coherent story about terrain, and it is not evidence
+the walker regressed. Two things produce it. `terrain_levels_vel` promotes on distance covered,
+so robots dying at 9.3 s instead of 15.6 s never climb the curriculum — that is the tier drop.
+And the proximity proxy under-counts collisions, per the paragraph above. The honest reading is
+that debris accounts for *more* than 27 points of the 72-point fall rate, not that the
+locomotion policy got worse.
+
+## Demo v4 — `artifacts/videos/rescue_demo_v4.mp4`
+
+Seed 1137, 2.5–3.8 m spawns, `found_victim: true`, **`fell: true`**.
+
+**This is a fallback take, and the fallback is the finding.** `harness/make_demo.sh` re-rolls
+seeds looking for an episode that both finds a casualty and stays upright. Across 12 attempts
+on this scene: two found a casualty and *both* fell; three neither found nor fell; seven fell
+without finding. **No clean take exists.** The script keeps the best available rather than
+failing, so the video shows the robot reaching the casualty at 14.9 s, radioing it in, and then
+going down.
+
+An earlier attempt at 5.0–6.5 m spawns — the range originally wanted for the demo — produced
+**0 successes in 12 takes, with 9 falls.** The long-range demo is not renderable from this
+checkpoint. That is a measurement, not a rendering problem.
+
+## What was not done, and what it would cost
+
+**The policy was never retrained for any of this.** The scene changes, the metric and the
+renderer are all in place and verified; the 2000-iteration stage-2 resume that would teach
+obstacle avoidance was scoped, costed at ~2.5 h and ~$6 on this hardware, and deferred on
+budget grounds.
+
+So every number above is a *baseline*, and there is no "after" column yet. Whoever picks this
+up starts from a well-posed problem: obstacles exist, the LiDAR senses them, collisions are
+punished by termination, and `eval_rescue.py` reports the collision split needed to tell
+whether avoidance is emerging.
+
+Expectations for that run, set from what is measured here:
+
+1. **A fall rate near 0.35–0.40 would be success, not disappointment.** Phase 4 established a
+   ~32-point residual of terrain falls that no intervention removed. Debris stacks on top of
+   that floor rather than replacing it.
+2. **Obstacle avoidance is being *unlearned into*, not learned fresh.** `model_4197.pt` has
+   strong priors — walk forward, track the velocity command, head at the warm blob — and
+   avoidance requires overriding the straight-line habit.
+3. **The avoidance signal is thin.** At 3 m a block lights 1–2 rays of 288, and the penalty is
+   terminal rather than graded, so credit has to propagate back 10–50 steps to the decision
+   point.
+
+Also outstanding, in rough order of value:
+
+- **The height scanner does not see debris.** It raycasts `/World/ground` only, so foot-level
+  awareness at an obstacle is absent. Fixing it means converting a `RayCaster` to
+  `MultiMeshRayCaster` and shifts the input distribution the locomotion policy depends on —
+  worth doing with a retrain, not before one.
+- **A CNN encoder** remains the only route to a higher-resolution *policy* thermal image.
+- **Radiometry on the observation path**, not just the viz path, would make the robot cope with
+  a fading noisy signal rather than a flat class label. Invalidates existing checkpoints.
+
+## Reproducing the environment
+
+The Phase 4 host was configured by hand and destroyed, and nothing recorded how — rebuilding it
+meant reading version strings back out of `stage1.log`. That is now fixed:
+
+- `harness/setup_isaac.sh` — bare box to full stack, idempotent, ~25 min on this hardware.
+  Gates on Vulkan first, because a discrete-GPU Vulkan device is the one hard requirement and
+  checking it costs 30 seconds against a 25-minute install. Exports `PIP_DEFAULT_TIMEOUT` and
+  `PIP_RETRIES`, without which a stalled socket hangs the install indefinitely — one did, for
+  95 minutes.
+- `harness/deploy_task.sh` — pushes the task package, harness and a checkpoint.
+- `harness/make_demo.sh` — take selection and encoding.
+- `harness/sync_watchdog.sh` — periodic checkpoint pull, since two instances were lost mid-work.
+
+### Infrastructure notes
+
+Three instances were used. Two `massedcompute_L40S` failed: one self-terminated mid-eval, the
+other's networking degraded until SSH was unusable. The `verda_RTXPro6000` completed everything
+asked of it. Both L40S failures were provider-side, not GPU-related.
+
+RTX PRO 6000 Blackwell (compute capability 12.0) runs this stack correctly, including Vulkan
+and the RTX renderer, on driver 580.126.09 under Ubuntu 24.04 — a newer combination than any
+previous run here, and worth knowing works.
+
+**A100 and H100 are the wrong hardware for this project** despite being the obvious upgrades.
+They have no RT cores. The thermal camera is an RTX render pass and rendering dominates
+iteration cost (7.5 s/iter with the camera against 3.07 s/iter without), so a compute-optimised
+card is a downgrade. L40S, RTX 6000 Ada and RTX PRO 6000 are the right family.
