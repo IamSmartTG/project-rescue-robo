@@ -27,9 +27,15 @@ RUNS = [
     ("walker alone (random cmd)", "eval_rescue_debris_baseline.json"),
     ("scripted seeker (Aug 15)", "eval_scripted_seeker.json"),
     ("scripted seeker (Aug 16)", "eval_seeker_veto.json"),
+    ("navigator iter 0", "eval_nav_0.json"),
     ("navigator iter 100", "eval_nav_100.json"),
     ("navigator iter 200", "eval_nav_200.json"),
     ("navigator iter 299", "eval_navigator.json"),
+    # Corrected run: residual actually zero-initialised, so iteration 0 really is the seeker.
+    # Evaluated at 1024 episodes because 256 cannot resolve the differences that matter here --
+    # see the two scripted-seeker rows above, same config, 0.2109 vs 0.2500.
+    ("seeker control (n=1024)", "eval_seeker_n1024.json"),
+    ("zero-init nav i99 (n=1024)", "eval_zeroinit99_n1024.json"),
 ]
 
 
