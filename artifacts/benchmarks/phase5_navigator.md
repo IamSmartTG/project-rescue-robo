@@ -384,6 +384,29 @@ install a new objective) or whether rubble makes the *task* harder — occluding
 lengthening routes — rather than making the *gait* worse. The second is now the better bet, and
 it is a search-and-planning problem, not a locomotion one.
 
+## Demo videos
+
+`artifacts/videos/rescue_demo_v6.mp4` is the deliverable: scripted seeker on the
+debris-fine-tuned walker — the best-measured configuration — found the casualty, no fall,
+clean take on try 3 of 10. Its `summary.json` records `navigator_checkpoint: null`, so the
+video's provenance is checkable rather than asserted.
+
+`rescue_demo_v5.mp4` was rendered from the buggy-init navigator (`model_299`) and is kept only
+as the record of that arm. It should not be used to illustrate the system.
+
+**On the thermal panel.** The v5 render shows a uniformly ambient thermal panel at every frame,
+including the one where the voice log declares the casualty found, which looked like a repeat of
+the Phase 5 thermal-render bug. It is not. v6 shows the casualty as a large bright region in the
+16×16 policy view. The difference is the spawn annulus: v5 used `--victim_radius 5.0 6.5`, and
+the thermal camera's far clip is 8.0 m, so at that range a 0.30 m casualty is at or below one
+pixel. v6 used `3.5 5.0`. The sensor was always working — the earlier eval evidence said as much
+(the seeker's only input is thermal and it beats the blind walker at p=0.0002) — but the demo
+framing hid it.
+
+A demo take is chosen by re-rolling seeds until the episode is worth showing, which selects a
+*representative successful* episode, not a typical one. With a ~49% fall rate the typical episode
+is not a rescue. The eval tables, not the video, describe typical behaviour.
+
 ## Caveats
 
 - **`Metrics/success_rate` in the training log is velocity-command tracking, not casualty

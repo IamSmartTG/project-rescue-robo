@@ -29,12 +29,20 @@ honest measurement of what works.
 A collapsed structure. A quadruped with a thermal camera, a 288-ray LiDAR and an emergency
 supply payload. It has 20 seconds to reach a casualty.
 
-**Visual:** one frame from `artifacts/videos/rescue_demo_v5.mp4` — chase cam + thermal panel +
-LiDAR scope. Extract with:
-`ffmpeg -ss 3.7 -i rescue_demo_v5.mp4 -frames:v 1 hero.png`
+**Visual — use `artifacts/videos/rescue_demo_v6.mp4`, not v5.** v6 is the best configuration
+(scripted seeker on the debris-fine-tuned walker) and its `summary.json` records
+`navigator_checkpoint: null`, so the video can prove what drove it. v5 was rendered with the
+buggy navigator we report as the *worst* arm — do not use it.
 
-Speaker note: the three panels are the whole argument that the sensors are load-bearing — left
-is what an observer sees, right is what the robot senses.
+Best hero frame is the moment of detection, t ≈ 8.2 s:
+`ffmpeg -ss 8.24 -i artifacts/videos/rescue_demo_v6.mp4 -frames:v 1 hero.png`
+
+At that frame the casualty (prone-adult mesh) fills a large bright region of the 16×16 thermal
+panel — this is the single best "the sensors are load-bearing" image in the project.
+
+Speaker note: left is what an observer sees, right is what the robot senses. The thermal panel
+is 16×16 — that is genuinely all the policy gets. Worth saying out loud; people assume the
+robot sees the left panel.
 
 ---
 
