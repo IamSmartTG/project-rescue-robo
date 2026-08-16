@@ -4,9 +4,11 @@ Run dates: 2026-08-15 → 2026-08-16
 Hardware: **NVIDIA Brev L40S, 46 GB VRAM** (massedcompute; `brev-ys88z1w2k` then `rescue-robo`)
 Stack: Isaac Sim 6.0.1.0, Isaac Lab 3.0.0-beta2, RSL-RL PPO 5.0.1, Python 3.12
 
-> **RESULTS PENDING** — this file is written up to the method. The eval numbers land after
-> the resumed run finishes; every results cell below is marked `TBD` and must not be quoted
-> until filled.
+> **Headline:** the learned navigator scored **worse** than the hand-written controller it was
+> supposed to improve on (0.160 vs 0.250, p=0.011) — and the cause was found: the residual was
+> never actually initialised as a residual, so training began ~12 points below its intended
+> baseline. See [Root cause](#root-cause-the-residual-was-never-a-residual). A corrected run is
+> reported in [Corrected run](#corrected-run-zero-initialised-residual).
 
 ## What this phase is for
 
@@ -95,7 +97,7 @@ shield vetoed, so the claim can be checked rather than assumed.
 |---|---|
 | Task | `Isaac-Rescue-Anymal-C-Nav-v0` |
 | Envs | 4096 |
-| Iterations | 300 |
+| Iterations | 300 (Aug 15 run), 100 (corrected run) |
 | Throughput | ~2999 env-steps/s, ~33 s/iteration |
 | Env steps at iter 244 | 24,084,480 |
 | Walker | `anymal_c_rescue/2026-08-13_19-20-52/model_4197.pt`, frozen |
@@ -111,33 +113,144 @@ Resuming restores optimizer state and the iteration counter alongside the weight
 a continuation rather than a fine-tune from a cold optimizer. The gap is the ~19 iterations of
 progress between the last sync and the loss of the host, which were re-run.
 
+The final checkpoint is **`model_299.pt`**, and no `model_300.pt` exists. RSL-RL's training loop is
+`range(start_it, start_it + n)`, so a 300-iteration run ends on index 299 — that file *is* the
+300th iteration, not one short of it. Worth stating because "where is model_300" is the
+obvious first question and the obvious wrong answer is "the run was truncated".
+
+Startup logged ~34 PhysX `collisionStackSize buffer overflow -- contacts have been dropped`
+errors, all within the first second while 4096 environments spawn. They do not recur once the
+sim is stepping. Noted rather than buried, since dropped contacts are in principle the same
+signal fall detection reads.
+
 ## Results
 
-> `TBD` — filled from `artifacts/benchmarks/eval_navigator.json` once the run completes.
+All rows: 256 episodes, 2 casualties, 4 debris props, identical protocol. Reproduce the table
+and the significance tests with `python3 harness/compare_evals.py`.
 
-All rows: 256 episodes, 2 casualties, 4 debris props, identical protocol.
+| Run | Success | ±SE | SPL | Fall | Fall near debris | Shield veto |
+|---|---|---|---|---|---|---|
+| Walker alone (random command) | 0.1250 | 0.021 | 0.0789 | 0.719 | 0.270 | n/a |
+| Scripted seeker (Aug 15) | 0.2109 | 0.026 | 0.1561 | 0.523 | 0.168 | n/a |
+| **Scripted seeker (Aug 16)** | **0.2500** | 0.027 | 0.1788 | 0.445 | 0.148 | 0.027 |
+| Navigator iter 0 | 0.1289 | 0.021 | 0.0768 | — | — | — |
+| Navigator iter 100 | 0.1328 | 0.021 | 0.0969 | 0.746 | 0.227 | 0.022 |
+| Navigator iter 200 | 0.1289 | 0.021 | 0.0731 | 0.703 | 0.289 | 0.022 |
+| Navigator iter 299 | 0.1602 | 0.023 | 0.1195 | 0.695 | 0.270 | 0.019 |
 
-| Run | Task | Success | SPL | Fall rate | Shield veto |
-|---|---|---|---|---|---|
-| Walker alone (random command) | `Isaac-Rescue-Anymal-C-v0` | 0.1250 | 0.0789 | 0.719 | n/a |
-| Scripted seeker (navigator @ iter 0) | `Isaac-Rescue-Anymal-C-Nav-v0` | 0.2109 | 0.1561 | 0.523 | TBD |
-| **Navigator (`model_300`)** | `Isaac-Rescue-Anymal-C-Nav-v0` | TBD | TBD | TBD | TBD |
+Two-sided z on proportions, against the scripted seeker (Aug 16):
 
-The bar that matters is **0.2109**, not 0.1250. Beating the random-command walker only proves
-that pointing the robot at warm pixels helps, which the scripted seeker already established
-for free. The navigator earns its keep only by beating the seeker *and* keeping the shield
-veto rate low.
+| Comparison | Δ | z | p | |
+|---|---|---|---|---|
+| walker alone | −0.1250 | −3.67 | 0.0002 | significant |
+| scripted seeker (Aug 15) | −0.0391 | −1.05 | 0.2930 | **not** significant |
+| navigator iter 100 | −0.1172 | −3.41 | 0.0007 | significant |
+| navigator iter 200 | −0.1211 | −3.54 | 0.0004 | significant |
+| navigator iter 299 | −0.0898 | −2.53 | 0.0113 | significant |
 
-### Fall-rate split
+**The learned navigator is significantly worse than the scripted controller, at every
+checkpoint measured.** It was never ahead.
 
-| Run | Total | Near debris | Terrain only |
+Read the second row before the others: the *same* scripted seeker, same protocol, measured on
+two different days, scored 0.2109 and 0.2500. That gap tests at p=0.29 — it is noise. It is
+also the reason every claim here carries a test rather than a comparison by eye.
+
+### The mechanism
+
+The navigator did not fail to learn. It learned the wrong thing, and the trajectory metrics
+say which:
+
+| | Seeker | Navigator (299) | |
 |---|---|---|---|
-| Walker alone | 0.719 | 0.270 | 0.449 |
-| Scripted seeker | 0.523 | 0.168 | 0.356 |
-| **Navigator** | TBD | TBD | TBD |
+| Mean path length | 6.03 m | **4.58 m** | navigator takes a straighter line |
+| Mean time to find | 5.49 s | **4.16 s** | and gets there sooner |
+| Mean episode length | 13.29 s | 9.05 s | but episodes end early |
+| Fall rate | 0.445 | 0.695 | because it falls |
 
-The debris-adjacent column is the one the navigator is supposed to move: it is the fraction of
-falls attributable to rubble the policy could have steered around.
+It bought directness with falls, and the falls cost more than the directness gained. The
+walker is frozen, so the low level cannot adapt to a high level that commands more aggression
+than the gait can absorb on rough terrain. Freezing the walker is what made this phase
+affordable; it is also what caps it.
+
+Two controls worth stating:
+
+- **Shield veto is ~2% for both.** Neither controller is being rescued by the safety layer, so
+  "it learned to avoid obstacles" and "the shield saved it" are distinguishable here, and the
+  answer is that the shield is barely engaging in either case.
+- **Terrain difficulty moved the wrong way for the navigator and it still lost.** Mean terrain
+  level ended at 2.47 for the navigator against 3.39 for the seeker. Levels are seeded randomly
+  and then moved by the curriculum *during* the eval, so this is a consequence of walking badly
+  (demotion), not a starting handicap. The navigator was measured on **easier** terrain and
+  still scored lower.
+
+## Root cause: the residual was never a residual
+
+`navigator.py` promises that at iteration 0 the policy behaves exactly like the scripted
+seeker, so training can only move away from a known-decent controller. **Nothing in the code
+implemented that promise.**
+
+`init_std=0.3` in `NavigatorPPORunnerCfg` controls the *exploration noise*. Evaluation uses the
+distribution **mean**, and the mean is whatever the untrained MLP emits. The actor's output
+layer was left at PyTorch's default `Linear` init (`mlp.4`, measured `absmean=0.044`,
+`max=0.089` — consistent with the default ±1/√128 bound).
+
+Measured on the Aug 15 run's `model_0`, feeding the actor normalized observations:
+
+| | delta vx | delta vy | delta wz |
+|---|---|---|---|
+| mean | +0.084 | −0.099 | +0.004 |
+| mean abs | 0.148 | 0.176 | 0.127 |
+| p95 abs | 0.353 | 0.426 | 0.311 |
+
+Against a ±1.0 m/s command clamp that is **15% of the entire admissible command range**,
+including a standing sideways bias. That is not a correction to the seeker; it is a corruption
+of it. The consequence is the `navigator iter 0` row above: **0.1289**, statistically
+indistinguishable from the random-command walker's 0.1250, and nowhere near the 0.2500 the
+seeker actually scores.
+
+So the correct reading of the 300-iteration run is not "residual RL does not work here":
+
+> Training started ~12 points below its intended baseline, and PPO spent the entire budget
+> partially digging back out — 0.129 → 0.133 → 0.129 → 0.160. That is real learning, spent
+> almost entirely on undoing an initialisation bug.
+
+### The fix, and how it was verified
+
+Zero the output head's weight **and** bias at construction (`_zero_output_layer` in
+`harness/train_navigator.py`), on fresh starts only — doing it after a resume would zero
+trained weights and discard the run silently.
+
+Verified against the installed rsl-rl 5.0.1 rather than assumed:
+
+- `rsl_rl/models/mlp_model.py` — `forward(..., stochastic_output: bool = False)`; evaluation
+  therefore takes the deterministic branch.
+- `rsl_rl/modules/distribution.py` — `GaussianDistribution.deterministic_output()` returns the
+  MLP output unchanged.
+
+With the head at zero, delta is identically zero for *every* observation, so iteration 0
+reproduces the scripted seeker exactly rather than approximately.
+
+Measured effect, both checkpoints one PPO update in:
+
+| | mean \|delta\| as % of the command clamp |
+|---|---|
+| Default init (Aug 15 run) | **15.01%** |
+| Zero init (corrected run) | **0.86%** |
+
+A note that cost some confusion: **`model_0.pt` is not the initial policy.** RSL-RL's loop
+collects, updates, *then* saves inside the same iteration, so `model_0.pt` is one gradient step
+in. The zeroed head reads `6.4e-3` there rather than exactly `0`.
+
+## Corrected run: zero-initialised residual
+
+> **PENDING** — 100 iterations from a genuine seeker-equivalent start, evaluated at 1024
+> episodes against a matched 1024-episode seeker control. Numbers land in this section.
+
+Why 1024 and not 256: at n=256 the standard error on a success rate near 0.25 is 0.027, so the
+standard error of a between-arm difference is ~0.037 and only a change of ~0.10 or larger is
+detectable. The two scripted-seeker runs differing by 0.039 at p=0.29 is that limit in action.
+At n=1024 the per-arm SE falls to ~0.013, which is what it takes for this comparison to
+resolve anything smaller than the effect already found.
 
 ## Caveats
 
