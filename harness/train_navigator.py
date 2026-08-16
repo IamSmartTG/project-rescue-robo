@@ -37,6 +37,13 @@ parser.add_argument("--num_envs", type=int, default=4096)
 parser.add_argument("--max_iterations", type=int, default=600)
 parser.add_argument("--inner_steps", type=int, default=5, help="physics steps per navigator decision")
 parser.add_argument("--log_dir", type=str, default="logs/rsl_rl/navigator")
+parser.add_argument(
+    "--resume_checkpoint",
+    type=str,
+    default=None,
+    help="navigator model_*.pt to continue from. --max_iterations is ADDITIVE on top of the "
+    "iteration stored in it, so 225 -> 300 is --max_iterations 75, not 300.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 args.enable_cameras = True  # the navigator's whole input is a rendered thermal image
@@ -91,7 +98,21 @@ nav_cfg.max_iterations = args.max_iterations
 
 os.makedirs(args.log_dir, exist_ok=True)
 runner = OnPolicyRunner(nav_env, nav_cfg.to_dict(), log_dir=args.log_dir, device=args.device)
-print(f"[INFO] training {args.max_iterations} iterations -> {args.log_dir}")
+
+start_it = 0
+if args.resume_checkpoint:
+    runner.load(args.resume_checkpoint)
+    start_it = runner.current_learning_iteration
+    # Printed loud because a load that silently starts from 0 produces a full, plausible,
+    # worthless run. The first log header must read `start_it/(start_it+max_iterations)`.
+    print(f"[INFO] resumed {args.resume_checkpoint} at iteration {start_it}")
+    if start_it == 0:
+        raise SystemExit(
+            f"{args.resume_checkpoint} restored iteration 0 -- that is a fresh start, not a "
+            "resume. Check the checkpoint is a navigator model_*.pt, not a walker one."
+        )
+
+print(f"[INFO] training {args.max_iterations} iterations -> {start_it + args.max_iterations}")
 runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=False)
 
 env.close()
