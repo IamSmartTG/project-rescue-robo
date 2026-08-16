@@ -4,11 +4,20 @@ Run dates: 2026-08-15 → 2026-08-16
 Hardware: **NVIDIA Brev L40S, 46 GB VRAM** (massedcompute; `brev-ys88z1w2k` then `rescue-robo`)
 Stack: Isaac Sim 6.0.1.0, Isaac Lab 3.0.0-beta2, RSL-RL PPO 5.0.1, Python 3.12
 
-> **Headline:** the learned navigator scored **worse** than the hand-written controller it was
-> supposed to improve on (0.160 vs 0.250, p=0.011) — and the cause was found: the residual was
-> never actually initialised as a residual, so training began ~12 points below its intended
-> baseline. See [Root cause](#root-cause-the-residual-was-never-a-residual). A corrected run is
-> reported in [Corrected run](#corrected-run-zero-initialised-residual).
+> **Headline:** the learned navigator lost to the hand-written controller it was built on, for
+> **two separate and separately diagnosed reasons** — a residual that was never initialised as a
+> residual, and an objective that pays the navigator for tracking its own command. Fixing the
+> first made the second visible. Underneath both, the real limit is locomotion: the walker has
+> never trained on debris, and rubble alone costs 26 points of success rate.
+>
+> | | Success (n=1024) |
+> |---|---|
+> | Scripted seeker (no learning) | **0.1553** |
+> | Learned navigator, init fixed | 0.0977 |
+>
+> Reading order: [Results](#results) → [Root cause #1](#root-cause-the-residual-was-never-a-residual)
+> → [Root cause #2](#why-the-navigator-is-scored-on-tracking-its-own-command)
+> → [What actually limits this robot](#what-actually-limits-this-robot).
 
 ## What this phase is for
 
@@ -59,8 +68,15 @@ the navigator owns everything that happened while its command was in force.
 ### Why a residual, and what it buys the comparison
 
 The navigator adds a delta to the seeker's command rather than emitting the command outright.
-With the output initialised near zero, **the policy at iteration 0 *is* the scripted seeker**
-(Johannink et al., *Residual Reinforcement Learning for Robot Control*, ICRA 2019).
+The design intent is that with the output initialised near zero, **the policy at iteration 0
+*is* the scripted seeker** (Johannink et al., *Residual Reinforcement Learning for Robot
+Control*, ICRA 2019).
+
+> ⚠️ **That intent was not implemented in the Aug 15 run.** The output head was left at default
+> init, so iteration 0 was *not* the scripted seeker and the guarantee below did not hold. This
+> section describes the design; [Root cause](#root-cause-the-residual-was-never-a-residual)
+> describes what the code actually did. Everything from here to the end of this subsection is
+> what the design *promises*, and is only true of the corrected run.
 
 Two consequences worth stating plainly:
 
@@ -243,14 +259,96 @@ in. The zeroed head reads `6.4e-3` there rather than exactly `0`.
 
 ## Corrected run: zero-initialised residual
 
-> **PENDING** — 100 iterations from a genuine seeker-equivalent start, evaluated at 1024
-> episodes against a matched 1024-episode seeker control. Numbers land in this section.
+100 iterations from a genuine seeker-equivalent start (verified: mean |delta| 0.86% of the
+command clamp against the old run's 15.01%), evaluated at 1024 episodes against a matched
+1024-episode seeker control.
 
 Why 1024 and not 256: at n=256 the standard error on a success rate near 0.25 is 0.027, so the
 standard error of a between-arm difference is ~0.037 and only a change of ~0.10 or larger is
 detectable. The two scripted-seeker runs differing by 0.039 at p=0.29 is that limit in action.
-At n=1024 the per-arm SE falls to ~0.013, which is what it takes for this comparison to
-resolve anything smaller than the effect already found.
+At n=1024 the per-arm SE falls to ~0.013.
+
+| n = 1024 | Scripted seeker | Zero-init navigator (iter 99) |
+|---|---|---|
+| **Success** | **0.1553** ± 0.0113 | **0.0977** ± 0.0093 |
+| SPL | 0.1073 | 0.0658 |
+| Fall rate | 0.5254 | **0.3809** |
+| Falls near debris | 0.1826 | **0.1270** |
+| Mean path length | 5.96 m | 3.36 m |
+| Mean time to find | 6.06 s | 10.15 s |
+| Mean episode length | 12.17 s | 14.76 s |
+| Shield veto | 0.0326 | 0.0173 |
+
+Δ success = −0.0576, z = −3.94, **p = 0.0001**. Fixing the initialisation did not make the
+navigator competitive. It made it *worse*, and in an informative direction: the corrected
+policy falls far less (0.38 vs 0.53), moves far less (3.36 m vs 5.96 m), survives longer
+(14.76 s vs 12.17 s) and finds fewer casualties.
+
+**It learned to stop searching and stay alive.**
+
+### Why: the navigator is scored on tracking its own command
+
+`nav_env.py` accumulates the **full environment reward** as the navigator's training signal.
+That reward was written for the walker, and its dominant terms are `track_lin_vel_xy_exp` and
+`track_ang_vel_z_exp` — which reward the walker for *following the velocity command*.
+
+The navigator **emits that command**. So it can raise its own reward by issuing commands that
+are trivially easy to follow — small, smooth, achievable — whether or not they lead anywhere
+near a casualty. The objective is circular.
+
+Final-iteration reward composition:
+
+| Term | Corrected run (iter 99) | Aug 15 run (iter 299) |
+|---|---|---|
+| `track_lin_vel_xy_exp` | **0.4069** | 0.2320 |
+| `track_ang_vel_z_exp` | **0.2853** | 0.2030 |
+| `victim_found` | **0.0565** ↓ | 0.0780 |
+| `victim_approach` | 0.0131 | 0.0140 |
+| `victim_heading` | 0.0510 | 0.0312 |
+| `Metrics/success_rate` (command tracking) | **0.9272** | 0.2221 |
+| `Episode_Termination/base_contact` | 0.3951 | 0.6609 |
+| **Mean reward** | **11.70** | 6.80 |
+
+Read the last row against the `victim_found` row. Total reward nearly doubled while the reward
+for actually finding casualties went **down**. Tracking terms total 0.692 against 0.121 for all
+three victim terms combined — a **5.7× imbalance** — so an optimiser that ignores rescue
+entirely is behaving correctly. `Metrics/success_rate = 0.9272` is the tell: the navigator set
+its own exam and scored 93%.
+
+This is specification gaming, not a training failure. The policy maximised the objective it was
+given. The objective was wrong.
+
+**The fix (identified, not yet tested):** score the navigator on the victim terms only, so the
+layer that chooses *where to go* is not paid for how easy it made the walker's tracking job.
+Note the trap — strip the locomotion terms entirely and nothing penalises falling any more, so
+the navigator may swing back to commanding suicidal velocities. The reward needs the victim
+terms plus a fall penalty, not simply the victim terms.
+
+## What actually limits this robot
+
+Both navigator failures are layered on top of a more basic problem, and the numbers name it:
+
+| Same walker, same task | Success | Fall rate |
+|---|---|---|
+| Before debris was added to the scene | **0.3867** | 0.414 |
+| After 4 debris props were added | 0.1250 | 0.719 |
+
+Adding rubble cost 26 points of success and raised falls by 30. **The walker has never trained
+on debris.** Phase 5 built the disaster scene and never retrained the locomotion policy for it,
+so every number on the debris scene is a zero-shot result against obstacles the gait has never
+encountered.
+
+That, not the search layer, is the dominant limit. A ~50% fall rate caps everything above it:
+the navigator can point perfectly at a casualty and it does not matter if the robot is on its
+side. Ablations on the pre-debris scene agree that locomotion is where the losses are —
+removing the payload moved falls 0.414 → 0.324, and disturbances 0.414 → 0.340.
+
+### Debris fine-tune
+
+`model_4197` resumed on the current rescue task (debris present, payload already narrowed to
+2–6 kg) for 500 further iterations — 4197 → 4697, ~6.0 s/iteration.
+
+> **PENDING** — evaluated at n=1024 against the same seeker control. Numbers land here.
 
 ## Caveats
 
@@ -265,3 +363,11 @@ resolve anything smaller than the effect already found.
   single-stage failure this pattern caused.
 - One training run, one seed. No error bars. With 256 episodes the success-rate standard error
   is roughly ±0.026, so differences smaller than about 5 points are not resolvable here.
+- **Absolute success rates depend on `--num_envs`, so numbers from different `n` must not be
+  quoted side by side.** The identical scripted seeker measured 0.2109 and 0.2500 at n=256 but
+  0.1553 at n=1024; pooling the two n=256 runs (0.2305) against n=1024 tests at p=0.0006, so
+  this is a systematic effect and not sampling noise. `num_envs` sets the terrain grid and env
+  spacing, not merely the sample count. Every comparison in this document is therefore made
+  *within* a fixed n, and the conclusion that the navigator loses to the seeker holds
+  independently at both n=256 and n=1024. Cross-n comparisons — in particular the pre-debris
+  0.3867, which is an n=256 number — indicate direction only, never a margin.
