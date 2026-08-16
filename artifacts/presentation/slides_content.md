@@ -155,31 +155,51 @@ was wrong.
 
 ---
 
-## Slide 9 — What actually limits the robot
+## Slide 9 — A hypothesis we tested and rejected
 
-**Chart: two bars, n=256, same walker, same task.**
+**The idea:** the walker has never trained on debris, so rubble should be the thing capping
+performance. Supporting evidence at the time — same walker, same task id, n=256:
 
 | | Success | Fall rate |
 |---|---|---|
-| Before debris existed in the scene | **0.3867** | 0.414 |
+| Before debris existed in the scene | 0.3867 | 0.414 |
 | After 4 debris props added | 0.1250 | 0.719 |
 
-The walker has **never trained on debris**. Every debris-scene number is zero-shot against
-obstacles the gait has never seen. Rubble alone costs 26 points.
+**The test:** resume the walker on the debris scene for 500 more iterations (49 min of GPU).
 
-Speaker note: a ~50% fall rate caps everything above it. The search layer can point perfectly
-at a casualty and it does not matter if the robot is on its side. This is the highest-value
-thing to fix, and it is not a search problem.
+**Chart: two bars, n=1024, with ±1 SE error bars overlapping visibly.**
+
+| n = 1024 | Success | Fall rate |
+|---|---|---|
+| Aug 13 walker (control) | 0.1553 ± 0.011 | 0.5254 |
+| Debris-finetuned walker | 0.1592 ± 0.011 | 0.4912 |
+
+Δ success = **+0.0039, p = 0.81.** No effect.
+
+Speaker note: this is the slide to be proud of, not embarrassed by. We formed a hypothesis,
+priced it, tested it, and it failed. Two flaws were visible in hindsight: the 0.3867 → 0.1250
+comparison spans several commits, not just the debris one, so it was confounded; and debris-
+adjacent falls were only 0.18 against 0.34 terrain-only, so rubble was never causing most of
+the falls. The run converts a plausible story into a measured negative.
 
 ---
 
-## Slide 10 — Debris fine-tune result
+## Slide 10 — Where the robot actually stands
 
-> **FILL FROM** `artifacts/benchmarks/eval_debris_finetune_n1024.json` once the run completes.
-> Chart: three bars at n=1024 — seeker 0.1553, zero-init navigator 0.0977, retrained walker ?
+**Chart: three bars, n=1024, success rate, ±1 SE. Y-axis 0 to 0.45.**
 
-Speaker note: state whether it moved and by how much. If it did not clear the seeker, say so —
-the diagnosis stands on the 0.3867 evidence either way.
+| n = 1024 | Success | Fall rate |
+|---|---|---|
+| **Scripted seeker + fine-tuned walker (best)** | **0.1592** | 0.4912 |
+| Scripted seeker + original walker | 0.1553 | 0.5254 |
+| Learned navigator (init fixed) | 0.0977 | 0.3809 |
+
+Plain English: drop the robot in the debris scene with two casualties and 20 seconds, and it
+reaches one about **16% of the time**, falling in roughly **half** of attempts.
+
+Speaker note: the honest bottom line. Sensors plus a 40-line hand-written controller beat every
+learned variant we produced. The learned layer is not yet earning its place, and we can say
+exactly why — which is slides 7 and 8.
 
 ---
 
@@ -201,15 +221,23 @@ itself, so success rate and SPL can never describe a different task than the rew
 
 ---
 
-## Slide 12 — What we would do next
+## Slide 12 — What we would do next, in priority order
 
-1. **Retrain locomotion on debris** — largest measured gap (26 points), evidence on slide 9.
-2. **Give the navigator its own reward** — victim terms plus a fall penalty, never the walker's
-   tracking terms. (The trap: strip tracking entirely and nothing penalises falling, so it will
-   swing to commanding suicidal velocities.)
-3. **Add memory.** Both controllers are stateless — a casualty that goes behind rubble is
-   forgotten instantly. This is what a learned navigator should beat a scripted one at, and it
-   was never the thing being tested.
+1. **Give the navigator its own reward** — victim terms plus an explicit fall penalty, never the
+   walker's command-tracking terms. This is the one change with a diagnosed mechanism behind it
+   (slide 8) rather than a hypothesis. *The trap:* strip tracking entirely and nothing penalises
+   falling, so it will swing back to commanding suicidal velocities.
+2. **Add memory.** Both controllers are stateless — a casualty that passes behind rubble is
+   forgotten instantly, and neither plans a route around anything. This is precisely what a
+   learned navigator should beat a scripted one at, and it is not what we tested.
+3. **Re-examine what rubble actually costs.** Slide 9 ruled out "the gait never trained on it".
+   The remaining candidate is that debris makes the *task* harder — occluding casualties,
+   lengthening routes — which is a search and planning problem, not a locomotion one.
+4. **More seeds before any of it.** Every number here is one training run. The two scripted-
+   seeker measurements differing by 4 points (p=0.29) is the reminder of what one run is worth.
+
+Speaker note: item 1 is the only one with a confirmed mechanism. Items 2–3 are hypotheses, and
+slide 9 is the cautionary tale about presenting a hypothesis as a finding.
 
 ---
 

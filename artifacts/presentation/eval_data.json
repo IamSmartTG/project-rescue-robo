@@ -107,7 +107,7 @@
   {
     "id": "seeker_control_n1024",
     "n": 1024,
-    "note": "primary control",
+    "note": "PRIMARY CONTROL",
     "success": 0.1553,
     "spl": 0.1073,
     "fall": 0.5254,
@@ -133,5 +133,20 @@
     "episode_s": 14.76,
     "terrain_level": 2.705,
     "shield_veto": 0.0173
+  },
+  {
+    "id": "seeker_debris_finetune_n1024",
+    "n": 1024,
+    "note": "BEST CONFIG; fine-tune had no effect (p=0.81)",
+    "success": 0.1592,
+    "spl": 0.1153,
+    "fall": 0.4912,
+    "fall_debris": 0.1719,
+    "fall_terrain": 0.3193,
+    "path_m": 6.44,
+    "time_to_find_s": 5.076,
+    "episode_s": 12.42,
+    "terrain_level": 3.338,
+    "shield_veto": 0.042
   }
 ]

@@ -346,9 +346,43 @@ removing the payload moved falls 0.414 → 0.324, and disturbances 0.414 → 0.3
 ### Debris fine-tune
 
 `model_4197` resumed on the current rescue task (debris present, payload already narrowed to
-2–6 kg) for 500 further iterations — 4197 → 4697, ~6.0 s/iteration.
+2–6 kg) for 500 further iterations — 4197 → 4696, ~6.0 s/iteration, 49 min.
 
-> **PENDING** — evaluated at n=1024 against the same seeker control. Numbers land here.
+**It did not work.** All rows n=1024, scripted seeker driving:
+
+| | Success | ±SE | Fall | Falls near debris | Falls terrain-only | SPL | Time to find |
+|---|---|---|---|---|---|---|---|
+| Aug 13 walker (control) | 0.1553 | 0.011 | 0.5254 | 0.1826 | 0.3428 | 0.1073 | 6.06 s |
+| Debris-finetuned walker | 0.1592 | 0.011 | 0.4912 | 0.1719 | 0.3193 | 0.1153 | 5.08 s |
+
+| Metric | Δ | z | p | |
+|---|---|---|---|---|
+| success rate | +0.0039 | +0.24 | 0.8085 | not significant |
+| fall rate | −0.0342 | −1.55 | 0.1214 | not significant |
+| falls near debris | −0.0107 | −0.63 | 0.5260 | not significant |
+| falls terrain-only | −0.0235 | −1.13 | 0.2583 | not significant |
+
+Every metric drifted the right way and not one of them clears noise.
+
+### The hypothesis was weaker than it was presented, and this is the correction
+
+The fine-tune was justified by `0.3867` (pre-debris) against `0.1250` (post-debris) — the same
+walker, the same task id. Two problems with that argument, both visible before the run:
+
+1. **It is a confounded comparison.** Those two evals are separated by several commits, not one:
+   the debris addition, but also the thermal-render change, the payload narrowing to 2–6 kg, and
+   the SPL / fall-split reporting change. Attributing the entire 26-point drop to rubble assumed
+   a single-variable change that the git history does not support.
+2. **The fall breakdown already argued against it.** Debris-adjacent falls are 0.18 against 0.34
+   terrain-only. Rubble was never causing most of the falls, so "the gait has never seen debris"
+   could not have been the dominant term in a 26-point drop.
+
+The run is still worth having: it converts a plausible story into a measured negative. What it
+rules out is that **500 iterations of fine-tuning recovers the debris penalty**. What it leaves
+open is whether the penalty needs far more training (Phase 3's stage 2 took 1200 iterations to
+install a new objective) or whether rubble makes the *task* harder — occluding casualties and
+lengthening routes — rather than making the *gait* worse. The second is now the better bet, and
+it is a search-and-planning problem, not a locomotion one.
 
 ## Caveats
 
