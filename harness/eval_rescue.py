@@ -41,6 +41,13 @@ parser.add_argument("--no_payload", action="store_true")
 # navigator: nothing calls set_delta(), so the residual stays at its initialised zeros. That
 # is exactly how the scripted baseline was produced -- and exactly how a "trained navigator"
 # result could silently be the baseline wearing a different label.
+# Isolates what the rubble actually costs, which no measurement has done yet. The comparison
+# everyone reaches for -- 0.3867 before debris against ~0.13 after -- is worthless for this:
+# it also changed the casualty count from three to two and spans several commits, and
+# rescue_env_cfg.py says in as many words that it "must be reported as a separate row rather
+# than compared directly". Toggling only this flag, on one checkpoint, in one session, is the
+# single-variable version of that question.
+parser.add_argument("--no_debris", action="store_true")
 parser.add_argument("--navigator_checkpoint", type=str, default=None)
 parser.add_argument("--inner_steps", type=int, default=5)
 AppLauncher.add_app_launcher_args(parser)
@@ -85,6 +92,20 @@ if args.no_disturbance:
         if getattr(env_cfg.events, term, None) is not None:
             setattr(env_cfg.events, term, None)
     print("[INFO] disturbance events disabled (push_robot, base_external_force_torque)")
+
+if args.no_debris:
+    # Banish the debris rather than deleting the assets. reset_debris places them via the same
+    # annulus sampler the victims use, so pushing that annulus far outside the ~4 m the robot
+    # can cover in a 20 s episode removes them from the task while leaving the scene graph,
+    # the rigid-body count and the physics cost identical. Deleting the RigidObjectCfgs instead
+    # would change the scene the LiDAR raycasts against and confound the very thing this
+    # isolates -- and the default spawn pose is unset, since the event is what places them, so
+    # simply disabling the event would drop four blocks on the robot's head at the origin.
+    if getattr(env_cfg.events, "reset_debris", None) is not None:
+        env_cfg.events.reset_debris.params["radius_range"] = (60.0, 62.0)
+        print("[INFO] debris banished to a 60-62 m annulus -- scene identical, task has no rubble")
+    else:
+        print("[WARN] --no_debris given but this task has no reset_debris event")
 
 if args.no_payload:
     # Note this measures an unloaded robot the policy was never trained as -- it trained
@@ -274,6 +295,10 @@ result = {
     "checkpoint": args.checkpoint,
     "task": args.task,
     "navigator": args.navigator_checkpoint,
+    # Recorded because debris_props below counts the assets in the scene, which is unchanged by
+    # --no_debris -- they are moved out of reach, not deleted. Without this field the two arms
+    # of the debris experiment produce JSONs that look identical in every descriptive key.
+    "no_debris": bool(args.no_debris),
     "episodes": n,
     "victims": len(victim_names),
     "success_rate": round(succ, 4),
