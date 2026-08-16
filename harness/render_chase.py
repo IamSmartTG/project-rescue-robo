@@ -52,6 +52,15 @@ parser.add_argument(
 # a caption claims a trained navigator -- a plausible-looking artifact that means the opposite
 # of what it says. Pass the navigator checkpoint to actually film the trained policy.
 parser.add_argument("--navigator_checkpoint", type=str, default=None)
+# Films the no-rubble scene, which is measurably easier: at n=1024 removing the debris moves
+# success 0.1602 -> 0.2266 and the fall rate 0.525 -> 0.275. A take from here shows a more
+# capable robot than any number in the write-up describes, so anything rendered with this must
+# be labelled as the no-debris scene. summary.json records the flag for that reason.
+parser.add_argument(
+    "--no_debris",
+    action="store_true",
+    help="banish the rubble; renders the easier no-debris scene -- label any output",
+)
 parser.add_argument("--inner_steps", type=int, default=5, help="physics steps per navigator decision")
 parser.add_argument(
     "--thermal_viz",
@@ -97,6 +106,16 @@ env_cfg.seed = args.seed
 # the warm blob), just more of it, and the take-selection loop re-rolls the seed until it
 # finds a clean episode -- so a harder setup costs re-rolls, not the deliverable. Say so in
 # the write-up rather than implying the policy was trained for this range.
+if args.no_debris:
+    # Same mechanism as eval_rescue.py --no_debris: move the blocks out of reach rather than
+    # deleting the assets, so the scene the LiDAR raycasts against is otherwise unchanged.
+    # Measured cost of the rubble at n=1024: success 0.1602 -> 0.2266, falls 0.525 -> 0.275.
+    if getattr(env_cfg.events, "reset_debris", None) is not None:
+        env_cfg.events.reset_debris.params["radius_range"] = (60.0, 62.0)
+        print("[INFO] debris banished -- THIS RENDER IS THE NO-RUBBLE SCENE, label it as such")
+    else:
+        print("[WARN] --no_debris given but this task has no reset_debris event")
+
 if args.victim_radius is not None:
     _reset_victims = getattr(env_cfg.events, "reset_victims", None)
     if _reset_victims is None:
@@ -635,6 +654,9 @@ with open(f"{args.out}/summary.json", "w") as f:
             # perfectly good demo of the *scripted* controller. Without this field the mp4 has
             # no provenance and a caption claiming a trained policy cannot be checked.
             "navigator_checkpoint": args.navigator_checkpoint,
+            # Which scene this was filmed in. A no-rubble take looks like a much more
+            # capable robot than the numbers describe, so the video must carry the flag.
+            "no_debris": bool(args.no_debris),
             "inner_steps": args.inner_steps if args.navigator_checkpoint else None,
             "seed": args.seed,
             "steps": saved,

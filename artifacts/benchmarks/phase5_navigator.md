@@ -378,11 +378,51 @@ walker, the same task id. Two problems with that argument, both visible before t
    could not have been the dominant term in a 26-point drop.
 
 The run is still worth having: it converts a plausible story into a measured negative. What it
-rules out is that **500 iterations of fine-tuning recovers the debris penalty**. What it leaves
-open is whether the penalty needs far more training (Phase 3's stage 2 took 1200 iterations to
-install a new objective) or whether rubble makes the *task* harder — occluding casualties and
-lengthening routes — rather than making the *gait* worse. The second is now the better bet, and
-it is a search-and-planning problem, not a locomotion one.
+rules out is that **500 iterations of fine-tuning recovers the debris penalty** — not that the
+penalty is small. That question was settled separately, below.
+
+### What the rubble actually costs — the single-variable measurement
+
+The comparison nobody had run: one checkpoint (`model_4696`), one session, n=1024, toggling
+only `--no_debris`, which moves the blocks to a 60–62 m annulus rather than deleting them so the
+scene the LiDAR raycasts against is otherwise identical.
+
+| n = 1024, same checkpoint | Debris ON | Debris OFF | Δ | p |
+|---|---|---|---|---|
+| **Success** | 0.1602 | **0.2266** | +0.0664 | **0.0001** |
+| SPL | 0.1167 | 0.1634 | +0.0467 | |
+| Fall rate | 0.5254 | **0.2754** | −0.2500 | **<0.0001** |
+| Falls near debris | 0.1709 | **0.0000** | −0.1709 | <0.0001 |
+| Falls terrain-only | 0.3545 | 0.2754 | −0.0791 | 0.0001 |
+| Mean path length | 6.24 m | 8.72 m | | |
+| Mean episode length | 12.02 s | 16.83 s | | |
+| Shield veto | 0.0375 | 0.1027 | | |
+
+**Rubble costs 6.6 points of success and 25 points of fall rate.** It is a large, real effect —
+the earlier fine-tune failed because 500 iterations is not enough to learn it, not because the
+penalty was imaginary. The "26 points" figure was still wrong: that number also contained the
+casualty count dropping from three to two. The single-variable cost is **6.6 points**.
+
+Two checks on the measurement itself:
+
+- `fall_rate_near_debris` reads exactly **0.0000** with the flag on, confirming the blocks are
+  genuinely out of the task rather than merely displaced nearby.
+- The debris-ON arm reproduced the previous session's identical configuration to within noise
+  (0.1602 vs 0.1592, p=0.95) — on a different instance, from a rebuilt stack. The pipeline is
+  reproducible at fixed `n`.
+
+Two results worth noticing beyond the headline:
+
+- **Removing debris also cut terrain-only falls** (0.3545 → 0.2754, p=0.0001), which the
+  category name says it should not. Rubble is destabilising the robot beyond the collisions
+  attributed to it — being crowded or deflected into terrain it would otherwise have handled.
+- **The shield fires nearly 3× more often with the debris gone** (0.1027 vs 0.0375). With
+  `fall_rate_near_debris` at zero there is no rubble to veto against, so the shield is
+  triggering on terrain geometry. It is not a debris-specific safety layer, and the low veto
+  rates reported elsewhere in this document should be read with that in mind.
+
+**Without rubble the robot reaches a casualty 22.7% of the time** — inside the 20–30% band, on
+the same policy that scores 16.0% with rubble present.
 
 ## Demo videos
 

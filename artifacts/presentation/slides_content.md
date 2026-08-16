@@ -163,32 +163,46 @@ was wrong.
 
 ---
 
-## Slide 9 — A hypothesis we tested and rejected
+## Slide 9 — What the rubble costs, measured properly
 
-**The idea:** the walker has never trained on debris, so rubble should be the thing capping
-performance. Supporting evidence at the time — same walker, same task id, n=256:
+**The wrong way to answer it** (what we did first): compare 0.3867 before debris against 0.1250
+after. That comparison spans several commits *and* the casualty count dropped from three to two.
+We spent a 500-iteration fine-tune on it. It moved success by +0.0039 — **p = 0.81, no effect.**
 
-| | Success | Fall rate |
+**The right way** (what we did second): one checkpoint, one session, n=1024, toggle only the
+debris.
+
+**Chart: paired bars, n=1024. Success and fall rate side by side.**
+
+| n = 1024, same checkpoint | Debris ON | Debris OFF |
 |---|---|---|
-| Before debris existed in the scene | 0.3867 | 0.414 |
-| After 4 debris props added | 0.1250 | 0.719 |
+| **Success** | 0.1602 | **0.2266** |
+| Fall rate | 0.5254 | **0.2754** |
+| Falls near debris | 0.1709 | **0.0000** |
 
-**The test:** resume the walker on the debris scene for 500 more iterations (49 min of GPU).
+Δ success = **+0.0664, p = 0.0001.** Rubble costs **6.6 points of success and 25 points of fall
+rate** — not the 26 points originally claimed, which also contained the casualty-count change.
 
-**Chart: two bars, n=1024, with ±1 SE error bars overlapping visibly.**
+Speaker note: the honest arc of this slide is the point. The instinct was right, the evidence
+first offered for it was wrong, and the number was wrong. The fine-tune failed not because the
+penalty was imaginary but because 500 iterations cannot learn it. Two validity checks worth
+mentioning if challenged: falls-near-debris reads exactly 0.0000 with the rubble removed, and
+the debris-ON arm reproduced the previous session's number to within noise (p=0.95) on a
+different machine.
 
-| n = 1024 | Success | Fall rate |
-|---|---|---|
-| Aug 13 walker (control) | 0.1553 ± 0.011 | 0.5254 |
-| Debris-finetuned walker | 0.1592 ± 0.011 | 0.4912 |
+---
 
-Δ success = **+0.0039, p = 0.81.** No effect.
+## Slide 9b — Two things the experiment exposed by accident (optional)
 
-Speaker note: this is the slide to be proud of, not embarrassed by. We formed a hypothesis,
-priced it, tested it, and it failed. Two flaws were visible in hindsight: the 0.3867 → 0.1250
-comparison spans several commits, not just the debris one, so it was confounded; and debris-
-adjacent falls were only 0.18 against 0.34 terrain-only, so rubble was never causing most of
-the falls. The run converts a plausible story into a measured negative.
+- **Removing debris also cut *terrain-only* falls**, 0.3545 → 0.2754 (p=0.0001) — a category
+  that by name should not have moved. Rubble destabilises the robot beyond the collisions
+  attributed to it.
+- **The safety shield fires ~3× more often with the debris gone** (0.1027 vs 0.0375). With no
+  rubble to veto against, it is triggering on terrain. It is not a debris-specific shield, and
+  the low veto rates quoted elsewhere should be read with that in mind.
+
+Speaker note: keep this in reserve. It is the kind of detail that answers "did you actually look
+at your data" convincingly.
 
 ---
 
@@ -231,21 +245,25 @@ itself, so success rate and SPL can never describe a different task than the rew
 
 ## Slide 12 — What we would do next, in priority order
 
-1. **Give the navigator its own reward** — victim terms plus an explicit fall penalty, never the
-   walker's command-tracking terms. This is the one change with a diagnosed mechanism behind it
-   (slide 8) rather than a hypothesis. *The trap:* strip tracking entirely and nothing penalises
-   falling, so it will swing back to commanding suicidal velocities.
-2. **Add memory.** Both controllers are stateless — a casualty that passes behind rubble is
+1. **Train the walker on debris properly — not a 500-iteration fine-tune.** Slide 9 puts a
+   6.6-point success gap and a 25-point fall gap on the rubble, so this is the largest measured
+   prize on the board. Phase 3's stage 2 needed 1200 iterations to install a new objective;
+   budget at that scale, not a third of it.
+2. **Give the navigator its own reward** — victim terms plus an explicit fall penalty, never the
+   walker's command-tracking terms. The one change with a diagnosed mechanism behind it
+   (slide 8). *The trap:* strip tracking entirely and nothing penalises falling, so it will
+   swing back to commanding suicidal velocities.
+3. **Add memory.** Both controllers are stateless — a casualty that passes behind rubble is
    forgotten instantly, and neither plans a route around anything. This is precisely what a
-   learned navigator should beat a scripted one at, and it is not what we tested.
-3. **Re-examine what rubble actually costs.** Slide 9 ruled out "the gait never trained on it".
-   The remaining candidate is that debris makes the *task* harder — occluding casualties,
-   lengthening routes — which is a search and planning problem, not a locomotion one.
+   learned navigator should beat a scripted one at, and it is not what we tested. Slide 9b's
+   finding that rubble destabilises beyond its own collisions makes route planning more
+   valuable, not less.
 4. **More seeds before any of it.** Every number here is one training run. The two scripted-
    seeker measurements differing by 4 points (p=0.29) is the reminder of what one run is worth.
 
-Speaker note: item 1 is the only one with a confirmed mechanism. Items 2–3 are hypotheses, and
-slide 9 is the cautionary tale about presenting a hypothesis as a finding.
+Speaker note: items 1 and 2 both have measurements behind them now. The ordering changed once
+the debris A/B ran — before it, item 1 looked dead. Worth saying out loud that the cheap
+measurement reordered the roadmap.
 
 ---
 
