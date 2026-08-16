@@ -431,6 +431,12 @@ debris-fine-tuned walker — the best-measured configuration — found the casua
 clean take on try 3 of 10. Its `summary.json` records `navigator_checkpoint: null`, so the
 video's provenance is checkable rather than asserted.
 
+`rescue_demo_v7_norubble.mp4` is the same policy filmed with `--no_debris`. It is the better
+*take* — two casualties located (10.16 s and 12.12 s), no fall — and the better *hero image*,
+but it shows a measurably easier scene: 0.2266 success against 0.1602 with rubble present. Its
+`summary.json` records `no_debris: true`. **Any slide using it must say the rubble was removed.**
+Used unlabelled it overstates the system by 6.6 points of success and 25 of fall rate.
+
 `rescue_demo_v5.mp4` was rendered from the buggy-init navigator (`model_299`) and is kept only
 as the record of that arm. It should not be used to illustrate the system.
 

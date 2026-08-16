@@ -29,20 +29,28 @@ honest measurement of what works.
 A collapsed structure. A quadruped with a thermal camera, a 288-ray LiDAR and an emergency
 supply payload. It has 20 seconds to reach a casualty.
 
-**Visual — use `artifacts/videos/rescue_demo_v6.mp4`, not v5.** v6 is the best configuration
-(scripted seeker on the debris-fine-tuned walker) and its `summary.json` records
-`navigator_checkpoint: null`, so the video can prove what drove it. v5 was rendered with the
-buggy navigator we report as the *worst* arm — do not use it.
+**Two videos, and the choice between them is an honesty decision.**
 
-Best hero frame is the moment of detection, t ≈ 8.2 s:
-`ffmpeg -ss 8.24 -i artifacts/videos/rescue_demo_v6.mp4 -frames:v 1 hero.png`
+| File | Scene | Take quality | Use it? |
+|---|---|---|---|
+| `rescue_demo_v6.mp4` | **with rubble** — matches every number in the deck | 1 casualty, no fall | **default choice** |
+| `rescue_demo_v7_norubble.mp4` | rubble removed (0.2266 vs 0.1602) | 2 casualties, no fall — better take | only if labelled |
+| `rescue_demo_v5.mp4` | with rubble, buggy navigator | — | **never** |
 
-At that frame the casualty (prone-adult mesh) fills a large bright region of the 16×16 thermal
-panel — this is the single best "the sensors are load-bearing" image in the project.
+v7 looks better because the scene is genuinely easier. If you use it, the slide must say the
+rubble was removed — unlabelled it overstates the robot by 6.6 points of success and 25 of fall
+rate. Both files record their conditions in `summary.json` (`no_debris`, `navigator_checkpoint`).
+
+**My recommendation:** open with v6 so the demo matches the numbers, and hold v7 for slide 9
+where removing the rubble is the *point* being made.
+
+Hero frames, both already extracted in `artifacts/presentation/`:
+- `hero_frame_detection.png` — v6, t≈8.2 s, casualty fills the thermal panel
+- `hero_frame_norubble.png` — v7, t≈9.8 s
 
 Speaker note: left is what an observer sees, right is what the robot senses. The thermal panel
-is 16×16 — that is genuinely all the policy gets. Worth saying out loud; people assume the
-robot sees the left panel.
+is 16×16 — that is genuinely all the policy gets. Worth saying out loud; people assume the robot
+sees the left panel.
 
 ---
 

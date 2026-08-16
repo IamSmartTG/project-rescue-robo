@@ -164,6 +164,12 @@ previous run's directory is a silent-overwrite hazard whenever a sync job is wat
   Every remote command needs `source ~/isaac/venv/bin/activate` first.
 - **A global `sed` rewrote a sentence into a tautology** ("`model_299.pt`, not `model_299.pt`").
   Search-and-replace across prose needs the diff read afterwards.
+- **`brev delete` does not always take on the first call.** Deleting `rescue-debris` returned
+  the instance name and exited cleanly, and the instance then showed `DEPLOYING` — not
+  `DELETING` — on the next poll. A second delete was needed. The command's success output is
+  not proof the machine is gone; only `brev ls` reporting no instances is. This is the exact
+  shape of the failure that once left an L40S running ~17 hours and took the account negative,
+  so verify in a loop rather than trusting the return.
 - **The thermal panel was called a probable bug before the cheap explanation was checked.** It
   was correct all along: `--victim_radius 5.0 6.5` against an 8.0 m far clip puts a 0.30 m
   casualty at or below one pixel. Investigating was right; asserting a likely cause first was
