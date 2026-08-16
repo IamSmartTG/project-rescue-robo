@@ -38,6 +38,12 @@ parser.add_argument("--max_iterations", type=int, default=600)
 parser.add_argument("--inner_steps", type=int, default=5, help="physics steps per navigator decision")
 parser.add_argument("--log_dir", type=str, default="logs/rsl_rl/navigator")
 parser.add_argument(
+    "--no_zero_init",
+    action="store_true",
+    help="skip zeroing the actor's output layer, reproducing the pre-fix runs (iter 0 does "
+    "NOT equal the scripted seeker). Only useful for reproducing the Aug 15-16 results.",
+)
+parser.add_argument(
     "--resume_checkpoint",
     type=str,
     default=None,
@@ -99,6 +105,44 @@ nav_cfg.max_iterations = args.max_iterations
 os.makedirs(args.log_dir, exist_ok=True)
 runner = OnPolicyRunner(nav_env, nav_cfg.to_dict(), log_dir=args.log_dir, device=args.device)
 
+def _zero_output_layer(actor) -> str:
+    """Zero the actor's last Linear so the residual starts at exactly zero.
+
+    Without this the residual is not a residual. ``init_std=0.3`` in NavigatorPPORunnerCfg
+    shrinks the *exploration noise*, but the policy's *mean* action is whatever the untrained
+    MLP emits, and evaluation uses the mean. Measured on the Aug 15 run's model_0: a mean
+    delta of +0.084 / -0.100 / +0.004 m/s and ~15% of the +/-1.0 command clamp in magnitude,
+    including a standing sideways bias. That is not a correction to the scripted seeker, it is
+    a corruption of it, and it cost ~12 points of success rate before training began --
+    model_0 evaluated at 0.129, statistically identical to the random-command walker's 0.125
+    and nowhere near the seeker's 0.25 the design promised.
+
+    Zeroing weight *and* bias makes delta identically zero, so iteration 0 reproduces the
+    scripted seeker exactly rather than approximately. Standard practice in residual RL and
+    the thing that makes "training can only move away from a known-decent controller" true.
+    """
+    last = None
+    for module in actor.modules():
+        if isinstance(module, torch.nn.Linear):
+            last = module  # the final Linear encountered is the output head
+    if last is None:
+        raise SystemExit("could not find a Linear layer in the actor to zero-init")
+    # The head is identified positionally -- the last Linear in modules() order. That is
+    # correct for the current actor (MLPModel registers obs_normalizer -> mlp -> distribution
+    # and only mlp holds Linears), but it is an assumption, not a guarantee. If a future actor
+    # grows a Linear after the mlp this would zero the wrong tensor, the run would look
+    # completely normal, and the residual claim would silently be false again. Checking the
+    # output width costs nothing and turns that into a startup failure.
+    if last.out_features != 3:
+        raise SystemExit(
+            f"zero-init target has {last.out_features} outputs, expected 3 (vx, vy, wz). "
+            "The actor's output head is not where this function assumed it was."
+        )
+    torch.nn.init.zeros_(last.weight)
+    torch.nn.init.zeros_(last.bias)
+    return f"{tuple(last.weight.shape)}"
+
+
 start_it = 0
 if args.resume_checkpoint:
     runner.load(args.resume_checkpoint)
@@ -111,6 +155,13 @@ if args.resume_checkpoint:
             f"{args.resume_checkpoint} restored iteration 0 -- that is a fresh start, not a "
             "resume. Check the checkpoint is a navigator model_*.pt, not a walker one."
         )
+elif not args.no_zero_init:
+    # Fresh start only. Doing this after a resume would zero out trained weights and silently
+    # throw the run away, which is a far worse failure than the bug it fixes.
+    shape = _zero_output_layer(runner.alg.actor)
+    print(f"[INFO] residual zero-init: actor output layer {shape} zeroed -- iter 0 == scripted seeker")
+else:
+    print("[WARN] --no_zero_init: residual starts NON-zero, iter 0 is NOT the scripted seeker")
 
 print(f"[INFO] training {args.max_iterations} iterations -> {start_it + args.max_iterations}")
 runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=False)

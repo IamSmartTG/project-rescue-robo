@@ -61,7 +61,7 @@ for try in $(seq 1 "${TRIES}"); do
         --out "${DIR}" \
         ${RADIUS:+--victim_radius ${RADIUS}} \
         ${NAV_CKPT:+--navigator_checkpoint "${NAV_CKPT}"} \
-        --headless 2>&1 | grep -aE "victim spawn annulus|thermal panel|VOICE|Error|Traceback" || true
+        --headless 2>&1 | grep -aE "navigator loaded|no navigator|victim spawn annulus|thermal panel|VOICE|Error|Traceback" || true
 
     [ -f "${DIR}/summary.json" ] || { echo "take ${try}: no summary.json, render failed"; continue; }
     FOUND=$(python3 -c "import json;print(json.load(open('${DIR}/summary.json'))['found_victim'])")

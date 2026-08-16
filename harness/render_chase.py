@@ -629,6 +629,13 @@ with open(f"{args.out}/summary.json", "w") as f:
         {
             "task": args.task,
             "checkpoint": args.checkpoint,
+            # Null here means the scripted seeker drove this take, not the navigator. Recorded
+            # because the video cannot show the difference: on the Nav task an absent
+            # --navigator_checkpoint leaves the residual delta at zeros, which films as a
+            # perfectly good demo of the *scripted* controller. Without this field the mp4 has
+            # no provenance and a caption claiming a trained policy cannot be checked.
+            "navigator_checkpoint": args.navigator_checkpoint,
+            "inner_steps": args.inner_steps if args.navigator_checkpoint else None,
             "seed": args.seed,
             "steps": saved,
             "found_victim": _ep_found,
